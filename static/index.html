@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scanner Monitor</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1>Scanner Monitor</h1>
+        <div class="status-bar">
+            <span id="ws-status"><span class="status-dot disconnected"></span>Disconnected</span>
+            <span id="pipeline-status"><span class="status-dot disconnected"></span>Pipeline idle</span>
+            <span id="counts"></span>
+            <span id="chunk-status" style="color:var(--text-dim)"></span>
+        </div>
+    </header>
+
+    <div class="tabs">
+        <div class="tab active" data-tab="live">Live</div>
+        <div class="tab" data-tab="history">History</div>
+        <div class="tab" data-tab="config">Settings</div>
+    </div>
+
+    <div class="main">
+        <!-- Live Panel -->
+        <div class="panel live-panel active" id="panel-live">
+            <div class="feed" id="feed">
+                <h2>Live Transcriptions</h2>
+                <div id="transcript-list">
+                    <div class="empty-state">Waiting for transcriptions...</div>
+                </div>
+            </div>
+            <div class="alerts-sidebar">
+                <h2>Alerts</h2>
+                <div id="alert-list">
+                    <div class="empty-state">No alerts yet</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- History Panel -->
+        <div class="panel history-panel" id="panel-history">
+            <h2>Transcription History</h2>
+            <div id="history-list"></div>
+            <div class="load-more">
+                <button class="btn" id="load-more-btn" onclick="loadHistory()">Load More</button>
+            </div>
+        </div>
+
+        <!-- Config Panel -->
+        <div class="panel config-panel" id="panel-config">
+            <h2 style="font-size:14px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:20px;">Settings</h2>
+            <div class="form-group">
+                <label>Stream URL</label>
+                <input type="url" id="cfg-stream-url" placeholder="https://broadcastify.cdnstream1.com/...">
+            </div>
+            <div class="form-group">
+                <label>OpenRouter API Key</label>
+                <input type="password" id="cfg-api-key" placeholder="sk-or-v1-...">
+            </div>
+            <div class="form-group">
+                <label>Analysis Model</label>
+                <select id="cfg-model">
+                    <option value="">Loading models...</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Whisper Model</label>
+                <select id="cfg-whisper">
+                    <option value="tiny">tiny (fastest)</option>
+                    <option value="base" selected>base (recommended)</option>
+                    <option value="small">small (better accuracy)</option>
+                    <option value="medium">medium (high accuracy)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Alert Sensitivity</label>
+                <select id="cfg-sensitivity">
+                    <option value="low">Low - Critical events only</option>
+                    <option value="medium" selected>Medium - Significant events</option>
+                    <option value="high">High - Most notable events</option>
+                </select>
+            </div>
+            <button class="btn" onclick="saveConfig()">Save Settings</button>
+            <span class="save-msg" id="save-msg">Settings saved!</span>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
