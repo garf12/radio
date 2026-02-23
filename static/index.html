@@ -3,12 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scanner Monitor</title>
+    <title>TXKtoday - Scanner Monitor</title>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
     <header>
-        <h1>Scanner Monitor</h1>
+        <h1>TXKtoday - Scanner Monitor</h1>
+        <div class="audio-meter">
+            <button class="live-listen-btn" id="live-listen-btn" onclick="toggleLiveAudio()" title="Listen live">
+                <svg viewBox="0 0 16 16" class="live-listen-icon" id="live-listen-icon"><polygon points="4,2 14,8 4,14"/></svg>
+            </button>
+            <div class="audio-meter-bar">
+                <div class="audio-meter-fill" id="audio-meter-fill"></div>
+                <div class="audio-meter-peak" id="audio-meter-peak"></div>
+            </div>
+            <span class="audio-meter-db" id="audio-meter-db">--dB</span>
+        </div>
         <div class="status-bar">
             <span id="ws-status"><span class="status-dot disconnected"></span>Disconnected</span>
             <span id="pipeline-status"><span class="status-dot disconnected"></span>Pipeline idle</span>
@@ -20,6 +30,7 @@
     <div class="tabs">
         <div class="tab active" data-tab="live">Live</div>
         <div class="tab" data-tab="history">History</div>
+        <div class="tab" data-tab="map">Map</div>
         <div class="tab" data-tab="config">Settings</div>
     </div>
 
@@ -33,9 +44,9 @@
                 </div>
             </div>
             <div class="alerts-sidebar">
-                <h2>Alerts</h2>
-                <div id="alert-list">
-                    <div class="empty-state">No alerts yet</div>
+                <h2>Events</h2>
+                <div id="event-list">
+                    <div class="empty-state">No events yet</div>
                 </div>
             </div>
         </div>
@@ -47,6 +58,30 @@
             <div class="load-more">
                 <button class="btn" id="load-more-btn" onclick="loadHistory()">Load More</button>
             </div>
+        </div>
+
+        <!-- Map Panel -->
+        <div class="panel map-panel" id="panel-map">
+            <div class="map-toolbar">
+                <div class="map-filter-group">
+                    <label>Show:</label>
+                    <select id="map-filter-status" onchange="filterMapMarkers()">
+                        <option value="">All Events</option>
+                        <option value="active">Active Only</option>
+                        <option value="resolved">Resolved Only</option>
+                    </select>
+                    <select id="map-filter-time" onchange="filterMapMarkers()">
+                        <option value="">All Time</option>
+                        <option value="1">Last Hour</option>
+                        <option value="6">Last 6 Hours</option>
+                        <option value="24">Last 24 Hours</option>
+                        <option value="72">Last 3 Days</option>
+                        <option value="168">Last 7 Days</option>
+                    </select>
+                </div>
+                <div class="map-stats" id="map-stats"></div>
+            </div>
+            <div id="map-container"></div>
         </div>
 
         <!-- Config Panel -->
@@ -83,10 +118,39 @@
                     <option value="high">High - Most notable events</option>
                 </select>
             </div>
+            <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
+            <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:12px;">AI Analysis Prompt</h3>
+            <div class="form-group">
+                <label>Base System Prompt <span style="color:var(--text-dim);font-weight:normal">(read-only)</span></label>
+                <textarea id="cfg-system-prompt" readonly rows="10" style="resize:vertical;opacity:0.7;cursor:default"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Custom Instructions <span style="color:var(--text-dim);font-weight:normal">(appended to prompt)</span></label>
+                <textarea id="cfg-custom-instructions" rows="5" style="resize:vertical" placeholder="e.g. This scanner monitors Springfield County PD. Alert on any mentions of Main Street or the downtown area. Ignore routine traffic stops on Highway 65."></textarea>
+            </div>
+            <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
+            <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:12px;">Map Settings</h3>
+            <div class="form-group">
+                <label>Google Maps API Key</label>
+                <input type="password" id="cfg-maps-api-key" placeholder="AIza...">
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Default Map Center Latitude</label>
+                    <input type="number" id="cfg-map-lat" step="0.0001" placeholder="33.4418">
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Default Map Center Longitude</label>
+                    <input type="number" id="cfg-map-lng" step="0.0001" placeholder="-94.0477">
+                </div>
+            </div>
             <button class="btn" onclick="saveConfig()">Save Settings</button>
             <span class="save-msg" id="save-msg">Settings saved!</span>
         </div>
     </div>
+
+    <audio id="shared-audio"></audio>
+    <audio id="live-audio" preload="none"></audio>
 
     <script src="/app.js"></script>
 </body>

@@ -27,6 +27,7 @@ def _transcribe(audio: np.ndarray, model_size: str) -> tuple[str, float]:
     model = _load_model(model_size)
     segments, info = model.transcribe(
         audio,
+        language="en",
         beam_size=5,
         vad_filter=True,
         vad_parameters=dict(
