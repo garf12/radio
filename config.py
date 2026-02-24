@@ -11,6 +11,7 @@ _PERSIST_KEYS = (
     "stream_url", "whisper_model", "analysis_model", "alert_sensitivity",
     "custom_instructions", "chunk_duration_s", "openrouter_api_key",
     "google_maps_api_key", "map_default_lat", "map_default_lng",
+    "event_timeout_minutes", "geocode_region", "geocode_max_radius_km",
 )
 
 
@@ -30,6 +31,9 @@ class Config:
     google_maps_api_key: str = field(default_factory=lambda: os.getenv("GOOGLE_MAPS_API_KEY", ""))
     map_default_lat: float = field(default_factory=lambda: float(os.getenv("MAP_DEFAULT_LAT", "33.4418")))
     map_default_lng: float = field(default_factory=lambda: float(os.getenv("MAP_DEFAULT_LNG", "-94.0477")))
+    event_timeout_minutes: int = field(default_factory=lambda: int(os.getenv("EVENT_TIMEOUT_MINUTES", "45")))
+    geocode_region: str = field(default_factory=lambda: os.getenv("GEOCODE_REGION", "Texarkana, TX"))
+    geocode_max_radius_km: float = field(default_factory=lambda: float(os.getenv("GEOCODE_MAX_RADIUS_KM", "50")))
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +45,9 @@ class Config:
             "custom_instructions": self.custom_instructions,
             "map_default_lat": self.map_default_lat,
             "map_default_lng": self.map_default_lng,
+            "event_timeout_minutes": self.event_timeout_minutes,
+            "geocode_region": self.geocode_region,
+            "geocode_max_radius_km": self.geocode_max_radius_km,
         }
 
     def update(self, data: dict) -> None:
@@ -53,10 +60,16 @@ class Config:
             self.google_maps_api_key = data["google_maps_api_key"]
         if "chunk_duration_s" in data:
             self.chunk_duration_s = int(data["chunk_duration_s"])
+        if "event_timeout_minutes" in data:
+            self.event_timeout_minutes = int(data["event_timeout_minutes"])
         if "map_default_lat" in data:
             self.map_default_lat = float(data["map_default_lat"])
         if "map_default_lng" in data:
             self.map_default_lng = float(data["map_default_lng"])
+        if "geocode_region" in data:
+            self.geocode_region = data["geocode_region"]
+        if "geocode_max_radius_km" in data:
+            self.geocode_max_radius_km = float(data["geocode_max_radius_km"])
         # Persist to database
         self._save()
 
@@ -68,7 +81,8 @@ class Config:
             return
         _str_keys = ("stream_url", "whisper_model", "analysis_model",
                       "alert_sensitivity", "custom_instructions",
-                      "openrouter_api_key", "google_maps_api_key")
+                      "openrouter_api_key", "google_maps_api_key",
+                      "geocode_region")
         for key in _str_keys:
             if key in saved and saved[key]:
                 setattr(self, key, saved[key])
@@ -78,6 +92,10 @@ class Config:
             self.map_default_lat = float(saved["map_default_lat"])
         if "map_default_lng" in saved:
             self.map_default_lng = float(saved["map_default_lng"])
+        if "event_timeout_minutes" in saved:
+            self.event_timeout_minutes = int(saved["event_timeout_minutes"])
+        if "geocode_max_radius_km" in saved:
+            self.geocode_max_radius_km = float(saved["geocode_max_radius_km"])
 
     def _save(self) -> None:
         """Persist current settings to the database."""

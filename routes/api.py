@@ -36,8 +36,9 @@ async def list_alerts(
 async def list_events(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    status: str = Query(None),
 ):
-    rows = await get_events(config.db_path, limit, offset)
+    rows = await get_events(config.db_path, limit, offset, status)
     return {"events": rows}
 
 

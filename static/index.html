@@ -29,6 +29,7 @@
 
     <div class="tabs">
         <div class="tab active" data-tab="live">Live</div>
+        <div class="tab" data-tab="events">Events</div>
         <div class="tab" data-tab="history">History</div>
         <div class="tab" data-tab="map">Map</div>
         <div class="tab" data-tab="config">Settings</div>
@@ -48,6 +49,21 @@
                 <div id="event-list">
                     <div class="empty-state">No events yet</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Events Panel -->
+        <div class="panel events-panel" id="panel-events">
+            <div class="events-toolbar">
+                <h2>Events</h2>
+                <div class="events-filter-buttons">
+                    <button class="events-filter-btn active" data-filter="all">All</button>
+                    <button class="events-filter-btn" data-filter="active">Active</button>
+                    <button class="events-filter-btn" data-filter="resolved">Resolved</button>
+                </div>
+            </div>
+            <div id="events-panel-list">
+                <div class="empty-state">No events yet</div>
             </div>
         </div>
 

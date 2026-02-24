@@ -14,6 +14,7 @@ from config import config
 from database import (
     init_db, insert_transcription, insert_alert,
     get_active_events, insert_event, update_event, link_alert_to_event, get_event_with_alerts,
+    auto_resolve_stale_events, find_matching_event,
 )
 from stream_capture import read_chunks, audio_to_wav_bytes
 from transcriber import transcribe_chunk
@@ -38,6 +39,7 @@ _last_transcription_time: str | None = None
 _last_chunk_time: str | None = None
 _chunks_processed: int = 0
 _silent_chunks: int = 0
+_last_stale_check: datetime | None = None
 
 
 def pipeline_status() -> dict:
@@ -168,11 +170,19 @@ async def run_pipeline() -> None:
                             coords = await geocode_location(
                                 location_text, config.google_maps_api_key,
                                 config.db_path, config.map_default_lat, config.map_default_lng,
+                                region_hint=config.geocode_region,
+                                max_radius_km=config.geocode_max_radius_km,
                             )
 
                         # Event tracking: link alert to existing or new event
                         active_ids = {e["id"] for e in active_events}
                         llm_event_id = result.get("event_id")
+                        # Coerce to int — LLM may return string "5" instead of int 5
+                        if llm_event_id is not None:
+                            try:
+                                llm_event_id = int(llm_event_id)
+                            except (ValueError, TypeError):
+                                llm_event_id = None
                         if llm_event_id and llm_event_id in active_ids:
                             await update_event(
                                 config.db_path,
@@ -186,18 +196,37 @@ async def run_pipeline() -> None:
                             await link_alert_to_event(config.db_path, alert["id"], llm_event_id)
                             event_id = llm_event_id
                         else:
-                            title = result.get("event_title") or result["summary"][:80]
-                            ev = await insert_event(
-                                config.db_path,
-                                title,
-                                result["category"],
-                                result["severity"],
-                                location_text=location_text if location_text else None,
-                                latitude=coords[0] if coords else None,
-                                longitude=coords[1] if coords else None,
+                            # Fallback: check for matching event by category + location/title similarity
+                            match = await find_matching_event(
+                                config.db_path, result["category"], location_text or "",
+                                alert_summary=result["summary"],
                             )
-                            await link_alert_to_event(config.db_path, alert["id"], ev["id"])
-                            event_id = ev["id"]
+                            if match:
+                                await update_event(
+                                    config.db_path,
+                                    match["id"],
+                                    severity=result["severity"],
+                                    status=result.get("event_status", "active"),
+                                    location_text=location_text if location_text else None,
+                                    latitude=coords[0] if coords else None,
+                                    longitude=coords[1] if coords else None,
+                                )
+                                await link_alert_to_event(config.db_path, alert["id"], match["id"])
+                                event_id = match["id"]
+                                logger.info("Fallback matched alert to existing event %d", match["id"])
+                            else:
+                                title = result.get("event_title") or result["summary"][:80]
+                                ev = await insert_event(
+                                    config.db_path,
+                                    title,
+                                    result["category"],
+                                    result["severity"],
+                                    location_text=location_text if location_text else None,
+                                    latitude=coords[0] if coords else None,
+                                    longitude=coords[1] if coords else None,
+                                )
+                                await link_alert_to_event(config.db_path, alert["id"], ev["id"])
+                                event_id = ev["id"]
 
                         # Fetch full event with nested alerts for broadcast
                         full_event = await get_event_with_alerts(config.db_path, event_id)
@@ -221,11 +250,32 @@ async def run_pipeline() -> None:
             except Exception:
                 logger.exception("Error processing chunk")
 
+            # Auto-resolve stale events periodically
+            try:
+                await _check_stale_events()
+            except Exception:
+                logger.exception("Error in stale event check")
+
     except Exception as e:
         _pipeline_error = str(e)
         logger.exception("Pipeline error")
     finally:
         _pipeline_running = False
+
+
+async def _check_stale_events() -> None:
+    global _last_stale_check
+    if config.event_timeout_minutes <= 0:
+        return
+    now = datetime.now(timezone.utc)
+    if _last_stale_check and (now - _last_stale_check).total_seconds() < 300:
+        return
+    _last_stale_check = now
+    resolved = await auto_resolve_stale_events(config.db_path, config.event_timeout_minutes)
+    for ev in resolved:
+        full_event = await get_event_with_alerts(config.db_path, ev["id"])
+        await ws_manager.broadcast({"type": "event", "data": full_event})
+        logger.info("Auto-resolved stale event %d: %s", ev["id"], ev.get("title", ""))
 
 
 def _write_file(path: str, data: bytes) -> None:

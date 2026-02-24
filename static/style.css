@@ -441,6 +441,65 @@ header h1 {
     animation: event-pulse 0.8s ease-out;
 }
 
+/* Events panel */
+.events-panel {
+    flex-direction: column;
+    height: 100%;
+}
+
+.events-panel.active { display: flex; }
+
+.events-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.events-toolbar h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin: 0;
+}
+
+.events-filter-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+.events-filter-btn {
+    padding: 5px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.events-filter-btn:hover {
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.events-filter-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+#events-panel-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+}
+
 /* Play button */
 .play-btn {
     background: none;
@@ -702,12 +761,92 @@ header h1 {
 }
 
 @media (max-width: 768px) {
-    .live-panel { flex-direction: column; }
-    .feed { border-right: none; border-bottom: 1px solid var(--border); }
-    .alerts-sidebar { width: 100%; height: 40%; }
+    /* Header: wrap to two lines */
+    header {
+        flex-wrap: wrap;
+        padding: 10px 12px;
+        gap: 8px;
+    }
+    header h1 {
+        width: 100%;
+        font-size: 16px;
+    }
     .audio-meter-bar { width: 80px; }
     .live-listen-btn { width: 24px; height: 24px; }
     .live-listen-icon { width: 10px; height: 10px; }
-    .map-toolbar { flex-direction: column; align-items: flex-start; }
+    #chunk-status { display: none; }
+    .status-bar {
+        gap: 10px;
+        font-size: 12px;
+    }
+
+    /* Body layout: flex column fills viewport */
+    body {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+    }
+    .main {
+        flex: 1;
+        min-height: 0;
+        height: auto;
+    }
+
+    /* Tabs: equal width, touch-friendly */
+    .tabs { padding: 0; }
+    .tab {
+        flex: 1;
+        text-align: center;
+        padding: 14px 8px;
+        font-size: 13px;
+    }
+
+    /* Live panel: hide sidebar on mobile (events have their own tab) */
+    .live-panel { flex-direction: column; }
+    .feed {
+        border-right: none;
+        flex: 1;
+        min-height: 0;
+    }
+    .alerts-sidebar { display: none; }
+
+    /* Event cards: larger touch targets */
+    .event-header { padding: 14px 16px; }
+    .event-title { font-size: 15px; }
+    .event-meta { flex-wrap: wrap; }
+
+    /* Inputs: prevent iOS zoom */
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+        font-size: 16px;
+        padding: 12px;
+    }
+
+    /* Buttons: full width, larger */
+    .btn {
+        width: 100%;
+        padding: 14px;
+        font-size: 16px;
+    }
+
+    /* Map toolbar: stack vertically */
+    .map-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .map-filter-group label { display: none; }
+    .map-filter-group select {
+        padding: 10px;
+        font-size: 14px;
+        flex: 1;
+    }
+    .map-filter-group {
+        flex-wrap: wrap;
+    }
+
+    /* Settings: full width, stacked form rows */
+    .config-panel { max-width: 100%; padding: 16px; }
     .form-row { flex-direction: column; gap: 0; }
 }

@@ -261,44 +261,53 @@ function addAlert(data) {
 
 // --- Events ---
 
+let eventsFilter = 'all';
+let eventsPanelInitialized = false;
+
 function handleEvent(eventData) {
-    const list = document.getElementById("event-list");
+    renderEventToContainer(eventData, "event-list", "event-");
+    renderEventToContainer(eventData, "events-panel-list", "ep-event-");
+    applyEventsFilter();
+}
+
+function renderEventToContainer(eventData, containerId, idPrefix) {
+    const list = document.getElementById(containerId);
+    if (!list) return;
     const empty = list.querySelector(".empty-state");
     if (empty) empty.remove();
 
-    const existingCard = document.getElementById(`event-${eventData.id}`);
+    const existingCard = document.getElementById(idPrefix + eventData.id);
     if (existingCard) {
-        // Update existing card
         const wasExpanded = existingCard.classList.contains("expanded");
-        const newCard = createEventCard(eventData);
+        const newCard = createEventCard(eventData, idPrefix);
         if (wasExpanded) newCard.classList.add("expanded");
         existingCard.replaceWith(newCard);
-        // Move to top
         list.prepend(newCard);
-        // Pulse animation
         newCard.classList.add("pulse");
         setTimeout(() => newCard.classList.remove("pulse"), 800);
     } else {
-        // New event card
-        const card = createEventCard(eventData);
+        const card = createEventCard(eventData, idPrefix);
         list.prepend(card);
         card.classList.add("pulse");
         setTimeout(() => card.classList.remove("pulse"), 800);
     }
 }
 
-function createEventCard(ev) {
+function createEventCard(ev, idPrefix) {
+    idPrefix = idPrefix || "event-";
     const card = document.createElement("div");
     card.className = `event-card ${ev.severity}`;
-    card.id = `event-${ev.id}`;
+    card.id = idPrefix + ev.id;
+    card.dataset.status = ev.status;
 
+    const cardElementId = idPrefix + ev.id;
     const alertCount = ev.alerts ? ev.alerts.length : (ev.alert_count || 0);
     const timeRange = ev.alerts && ev.alerts.length > 0
         ? `${formatTime(ev.alerts[0].timestamp)} – ${formatTime(ev.alerts[ev.alerts.length - 1].timestamp)}`
         : formatTime(ev.created_at);
 
     card.innerHTML = `
-        <div class="event-header" onclick="toggleEvent(${ev.id})">
+        <div class="event-header" onclick="toggleEvent('${cardElementId}', ${ev.id})">
             <div class="event-header-top">
                 <div class="event-header-badges">
                     <span class="alert-badge ${ev.severity}">${ev.severity}</span>
@@ -320,15 +329,14 @@ function createEventCard(ev) {
     return card;
 }
 
-function toggleEvent(eventId) {
-    const card = document.getElementById(`event-${eventId}`);
+function toggleEvent(cardElementId, eventId) {
+    const card = document.getElementById(cardElementId);
     if (!card) return;
     const isExpanded = card.classList.contains("expanded");
     if (isExpanded) {
         card.classList.remove("expanded");
     } else {
         card.classList.add("expanded");
-        // Load alerts if not already loaded
         const alertsContainer = card.querySelector(".event-alerts");
         const emptyState = alertsContainer.querySelector(".empty-state");
         if (emptyState) {
@@ -341,6 +349,49 @@ function toggleEvent(eventId) {
                     alertsContainer.innerHTML = '<div class="empty-state" style="padding:12px">Failed to load alerts</div>';
                 });
         }
+    }
+}
+
+// --- Events panel filter ---
+
+function applyEventsFilter() {
+    const list = document.getElementById("events-panel-list");
+    if (!list) return;
+    const cards = list.querySelectorAll(".event-card");
+    cards.forEach(card => {
+        if (eventsFilter === 'all' || card.dataset.status === eventsFilter) {
+            card.style.display = '';
+        } else {
+            card.style.display = 'none';
+        }
+    });
+}
+
+document.querySelectorAll(".events-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".events-filter-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        eventsFilter = btn.dataset.filter;
+        applyEventsFilter();
+    });
+});
+
+async function initEventsPanel() {
+    if (eventsPanelInitialized) return;
+    eventsPanelInitialized = true;
+    try {
+        const resp = await fetch("/api/events?limit=50");
+        const data = await resp.json();
+        const events = data.events || [];
+        // Render oldest first so newest ends up on top
+        events.slice().reverse().forEach(ev => {
+            if (!document.getElementById("ep-event-" + ev.id)) {
+                renderEventToContainer(ev, "events-panel-list", "ep-event-");
+            }
+        });
+        applyEventsFilter();
+    } catch (e) {
+        console.error("Failed to init events panel:", e);
     }
 }
 
@@ -374,6 +425,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
         if (tab.dataset.tab === "config") loadConfig();
         if (tab.dataset.tab === "history" && historyOffset === 0) loadHistory();
         if (tab.dataset.tab === "map") initMapPanel();
+        if (tab.dataset.tab === "events") initEventsPanel();
     });
 });
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 
 import httpx
@@ -18,12 +19,26 @@ def _normalize_address(text: str) -> str:
     return text
 
 
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Compute great-circle distance in km between two points."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 async def geocode_location(
     location_text: str,
     api_key: str,
     db_path: str,
     bias_lat: float,
     bias_lng: float,
+    region_hint: str = "",
+    max_radius_km: float = 50.0,
 ) -> tuple[float, float] | None:
     """Geocode a location string via Google Geocoding API with cache-first pattern.
 
@@ -32,6 +47,7 @@ async def geocode_location(
     if not location_text or not location_text.strip() or not api_key:
         return None
 
+    # Cache key uses original text (not the suffixed version)
     address_key = _normalize_address(location_text)
     if not address_key:
         return None
@@ -40,6 +56,11 @@ async def geocode_location(
     cached = await get_cached_geocode(db_path, address_key)
     if cached:
         return cached
+
+    # Append region hint to improve geocoding accuracy
+    query_address = location_text
+    if region_hint:
+        query_address = f"{location_text}, {region_hint}"
 
     # Build bounds ~30km around configured center for bias
     offset = 0.27  # ~30km in degrees
@@ -53,8 +74,9 @@ async def geocode_location(
             resp = await client.get(
                 "https://maps.googleapis.com/maps/api/geocode/json",
                 params={
-                    "address": location_text,
+                    "address": query_address,
                     "bounds": bounds,
+                    "components": "country:US",
                     "key": api_key,
                 },
             )
@@ -62,7 +84,7 @@ async def geocode_location(
             data = resp.json()
 
         if data.get("status") != "OK" or not data.get("results"):
-            logger.debug("Geocoding returned no results for: %s (status: %s)", location_text, data.get("status"))
+            logger.debug("Geocoding returned no results for: %s (status: %s)", query_address, data.get("status"))
             return None
 
         result = data["results"][0]
@@ -71,11 +93,21 @@ async def geocode_location(
         lng = loc["lng"]
         formatted = result.get("formatted_address", "")
 
+        # Distance filter: reject results too far from center
+        if max_radius_km > 0:
+            dist = _haversine_km(bias_lat, bias_lng, lat, lng)
+            if dist > max_radius_km:
+                logger.warning(
+                    "Geocode result for %r is %.1f km from center (max %.1f km), discarding: %s",
+                    location_text, dist, max_radius_km, formatted,
+                )
+                return None
+
         # Cache the result
         await insert_geocode_cache(db_path, address_key, lat, lng, formatted)
 
         return (lat, lng)
 
     except Exception:
-        logger.exception("Geocoding failed for: %s", location_text)
+        logger.exception("Geocoding failed for: %s", query_address)
         return None

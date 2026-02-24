@@ -30,7 +30,7 @@ Respond with ONLY a JSON object (no markdown, no code fences):
   "location": "Street address, intersection, or landmark mentioned"
 }}
 
-event_id: Set to the ID of an existing active event if this transcript is an update to that event. Set to null if this is a new event.
+event_id: IMPORTANT — Before creating a new event, carefully check the ACTIVE EVENTS list below. If the transcript relates to an already-listed event (same incident type AND similar location/description), you MUST set event_id to that event's ID instead of creating a new one. Only set to null if this is genuinely a NEW, unrelated incident.
 event_title: A short descriptive title for new events (e.g. "Vehicle pursuit on Highway 71"). Ignored when event_id is set to an existing event.
 event_status: "active" if the event is ongoing, "resolved" if the event has concluded (suspect in custody, fire extinguished, scene cleared, etc.)
 location: The street address, intersection, or specific location mentioned in the radio traffic (e.g. "400 block of Main Street", "Highway 71 and State Line Ave"). Set to "" if no location mentioned.
@@ -74,8 +74,10 @@ async def analyze_transcript(
     if active_events:
         event_lines = []
         for ev in active_events:
-            event_lines.append(f"- ID {ev['id']}: [{ev['category']}] {ev['title']} (severity: {ev['severity']}, since {ev['created_at']})")
-        active_events_section = "ACTIVE EVENTS (set event_id to one of these if the transcript updates it):\n" + "\n".join(event_lines)
+            loc = ev.get('location_text') or ''
+            loc_part = f" at {loc}" if loc else ""
+            event_lines.append(f"- ID {ev['id']}: [{ev['category']}] {ev['title']}{loc_part} (severity: {ev['severity']}, since {ev['created_at']})")
+        active_events_section = "ACTIVE EVENTS — You MUST match to one of these if the transcript is about the same incident. Prefer matching over creating new events:\n" + "\n".join(event_lines)
     else:
         active_events_section = ""
 

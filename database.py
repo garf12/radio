@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _get_conn(db_path: str) -> sqlite3.Connection:
@@ -282,20 +282,26 @@ async def get_active_events(db_path: str) -> list[dict]:
     return await asyncio.to_thread(_get_active_events, db_path)
 
 
-def _get_events(db_path: str, limit: int = 50, offset: int = 0) -> list[dict]:
+def _get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
+    where = ""
+    params: list = []
+    if status:
+        where = "WHERE e.status = ? "
+        params.append(status)
+    params.extend([limit, offset])
     rows = conn.execute(
         "SELECT e.*, COUNT(a.id) AS alert_count FROM events e "
         "LEFT JOIN alerts a ON a.event_id = e.id "
-        "GROUP BY e.id ORDER BY e.updated_at DESC LIMIT ? OFFSET ?",
-        (limit, offset),
+        f"{where}GROUP BY e.id ORDER BY e.updated_at DESC LIMIT ? OFFSET ?",
+        params,
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-async def get_events(db_path: str, limit: int = 50, offset: int = 0) -> list[dict]:
-    return await asyncio.to_thread(_get_events, db_path, limit, offset)
+async def get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_events, db_path, limit, offset, status)
 
 
 def _get_event_with_alerts(db_path: str, event_id: int) -> dict | None:
@@ -330,6 +336,109 @@ def _get_counts(db_path: str) -> dict:
 
 async def get_counts(db_path: str) -> dict:
     return await asyncio.to_thread(_get_counts, db_path)
+
+
+# --- Auto-resolve stale events & duplicate detection ---
+
+
+def _auto_resolve_stale_events(db_path: str, timeout_minutes: int) -> list[dict]:
+    conn = _get_conn(db_path)
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM events WHERE status = 'active' AND updated_at < ?", (cutoff,)
+    ).fetchall()
+    resolved = []
+    now = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        conn.execute(
+            "UPDATE events SET status = 'resolved', updated_at = ? WHERE id = ?",
+            (now, row["id"]),
+        )
+        event = dict(row)
+        event["status"] = "resolved"
+        event["updated_at"] = now
+        resolved.append(event)
+    conn.commit()
+    conn.close()
+    return resolved
+
+
+async def auto_resolve_stale_events(db_path: str, timeout_minutes: int) -> list[dict]:
+    return await asyncio.to_thread(_auto_resolve_stale_events, db_path, timeout_minutes)
+
+
+def _word_overlap_ratio(a: str, b: str) -> float:
+    """Jaccard similarity of word sets from two strings."""
+    words_a = set(a.lower().split())
+    words_b = set(b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _find_matching_event(db_path: str, category: str, location_text: str, alert_summary: str = "") -> dict | None:
+    """Find an active event matching by category + location or title similarity.
+
+    Matching strategy (checked in order):
+    1. Same category + location word overlap >= 40%
+    2. Same category + title vs alert_summary word overlap >= 40%
+    3. Any category + location word overlap >= 60% (handles category mismatches)
+    """
+    conn = _get_conn(db_path)
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM events WHERE status = 'active' AND updated_at >= ? ORDER BY updated_at DESC",
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return None
+
+    best_match = None
+    best_score = 0.0
+
+    for row in rows:
+        same_category = row["category"] == category
+
+        # Check location similarity
+        loc_score = 0.0
+        if location_text and row["location_text"]:
+            loc_score = _word_overlap_ratio(location_text, row["location_text"])
+
+        # Check title vs summary similarity
+        title_score = 0.0
+        if alert_summary and row["title"]:
+            title_score = _word_overlap_ratio(alert_summary, row["title"])
+
+        # Strategy 1: same category + location overlap >= 40%
+        if same_category and loc_score >= 0.4:
+            score = loc_score + 1.0  # boost for same category
+            if score > best_score:
+                best_score = score
+                best_match = row
+
+        # Strategy 2: same category + title/summary overlap >= 40%
+        if same_category and title_score >= 0.4:
+            score = title_score + 1.0
+            if score > best_score:
+                best_score = score
+                best_match = row
+
+        # Strategy 3: cross-category location match >= 60%
+        if loc_score >= 0.6:
+            score = loc_score
+            if score > best_score:
+                best_score = score
+                best_match = row
+
+    if best_match:
+        return dict(best_match)
+    return None
+
+
+async def find_matching_event(db_path: str, category: str, location_text: str, alert_summary: str = "") -> dict | None:
+    return await asyncio.to_thread(_find_matching_event, db_path, category, location_text, alert_summary)
 
 
 # --- Geocode cache & map queries ---
