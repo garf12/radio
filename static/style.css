@@ -526,37 +526,28 @@ header h1 {
     margin: 0;
 }
 
-.summaries-range-buttons {
-    display: flex;
-    gap: 6px;
-}
-
-.summaries-range-btn {
-    padding: 5px 14px;
-    border-radius: 20px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 13px;
-    cursor: pointer;
-    transition: all 0.15s;
-}
-
-.summaries-range-btn:hover {
-    border-color: var(--accent);
-    color: var(--text);
-}
-
-.summaries-range-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #fff;
-}
-
 #summaries-list {
     flex: 1;
     overflow-y: auto;
     padding: 16px;
+}
+
+.summary-section {
+    margin-bottom: 24px;
+}
+
+.summary-section-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+    font-weight: 600;
+}
+
+.summary-slot .empty-state {
+    padding: 30px 20px;
+    font-size: 14px;
 }
 
 .summary-card {
@@ -944,22 +935,6 @@ header h1 {
     }
     .map-filter-group {
         flex-wrap: wrap;
-    }
-
-    /* Summaries toolbar: stack vertically */
-    .summaries-toolbar {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 8px;
-    }
-    .summaries-range-buttons {
-        display: flex;
-    }
-    .summaries-range-btn {
-        flex: 1;
-        text-align: center;
-        padding: 10px 8px;
-        font-size: 14px;
     }
 
     /* Settings: full width, stacked form rows */

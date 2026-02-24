@@ -144,7 +144,7 @@ async def analyze_transcript(
         return None
 
 
-SUMMARY_SYSTEM_PROMPT = """You are a police radio situation analyst. You are given the last ~10 minutes of police/emergency radio transcripts. Produce a brief situational summary that gives a holistic view of current activity — NOT individual incident alerts.
+SUMMARY_SYSTEM_PROMPT = """You are a police radio situation analyst. You are given the last ~{period_label} of police/emergency radio transcripts. Produce a brief situational summary that gives a holistic view of current activity — NOT individual incident alerts.
 
 Focus on:
 - Overall activity level and tone of radio traffic
@@ -173,10 +173,13 @@ async def generate_summary(
     api_key: str,
     model: str = "google/gemini-2.0-flash-001",
     active_events: list[dict] | None = None,
+    period: str = "10min",
 ) -> dict | None:
     """Generate a situational summary from recent transcripts. Returns dict or None."""
     if not transcripts or not api_key:
         return None
+
+    period_label = "1 hour" if period == "hourly" else "10 minutes"
 
     if active_events:
         event_lines = []
@@ -188,7 +191,10 @@ async def generate_summary(
     else:
         active_events_section = ""
 
-    system_content = SUMMARY_SYSTEM_PROMPT.format(active_events_section=active_events_section)
+    system_content = SUMMARY_SYSTEM_PROMPT.format(
+        active_events_section=active_events_section,
+        period_label=period_label,
+    )
 
     # Format transcripts with timestamps
     transcript_lines = []

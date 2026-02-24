@@ -42,6 +42,7 @@ _chunks_processed: int = 0
 _silent_chunks: int = 0
 _last_stale_check: datetime | None = None
 _last_summary_time: datetime | None = None
+_last_hourly_summary_time: datetime | None = None
 
 
 def pipeline_status() -> dict:
@@ -272,6 +273,12 @@ async def run_pipeline() -> None:
             except Exception:
                 logger.exception("Error generating periodic summary")
 
+            # Generate hourly situation summary
+            try:
+                await _generate_hourly_summary()
+            except Exception:
+                logger.exception("Error generating hourly summary")
+
     except Exception as e:
         _pipeline_error = str(e)
         logger.exception("Pipeline error")
@@ -313,6 +320,7 @@ async def _generate_periodic_summary() -> None:
         config.openrouter_api_key,
         config.analysis_model,
         active_events=active_events,
+        period="10min",
     )
     if not result:
         return
@@ -331,10 +339,56 @@ async def _generate_periodic_summary() -> None:
         result["key_themes"],
         result["activity_level"],
         config.analysis_model,
+        summary_type="10min",
     )
 
     await ws_manager.broadcast({"type": "summary", "data": summary})
-    logger.info("Summary generated: activity_level=%s", result["activity_level"])
+    logger.info("10min summary generated: activity_level=%s", result["activity_level"])
+
+
+async def _generate_hourly_summary() -> None:
+    global _last_hourly_summary_time
+    if not config.openrouter_api_key:
+        return
+    now = datetime.now(timezone.utc)
+    if _last_hourly_summary_time and (now - _last_hourly_summary_time).total_seconds() < 3600:
+        return
+    _last_hourly_summary_time = now
+
+    transcripts = await get_recent_transcriptions(config.db_path, minutes=60)
+    if not transcripts:
+        return
+
+    active_events = await get_active_events(config.db_path)
+    result = await generate_summary(
+        transcripts,
+        config.openrouter_api_key,
+        config.analysis_model,
+        active_events=active_events,
+        period="hourly",
+    )
+    if not result:
+        return
+
+    period_start = transcripts[0]["timestamp"]
+    period_end = transcripts[-1]["timestamp"]
+    event_refs = [e["id"] for e in active_events] if active_events else []
+
+    summary = await insert_summary(
+        config.db_path,
+        result["summary_text"],
+        period_start,
+        period_end,
+        len(transcripts),
+        event_refs,
+        result["key_themes"],
+        result["activity_level"],
+        config.analysis_model,
+        summary_type="hourly",
+    )
+
+    await ws_manager.broadcast({"type": "summary", "data": summary})
+    logger.info("Hourly summary generated: activity_level=%s", result["activity_level"])
 
 
 def _write_file(path: str, data: bytes) -> None:

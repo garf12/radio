@@ -94,6 +94,11 @@ def init_db(db_path: str) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_summaries_ts ON summaries(timestamp);
     """)
+    # Migration: add summary_type column if missing
+    try:
+        conn.execute("ALTER TABLE summaries ADD COLUMN summary_type TEXT DEFAULT '10min'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.close()
 
 
@@ -566,6 +571,7 @@ def _insert_summary(
     key_themes: list | None,
     activity_level: str,
     model_used: str | None,
+    summary_type: str = "10min",
 ) -> dict:
     conn = _get_conn(db_path)
     ts = datetime.now(timezone.utc).isoformat()
@@ -573,9 +579,9 @@ def _insert_summary(
     themes_json = json.dumps(key_themes) if key_themes else None
     cur = conn.execute(
         "INSERT INTO summaries (timestamp, summary_text, period_start, period_end, transcription_count, "
-        "event_references, key_themes, activity_level, model_used) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "event_references, key_themes, activity_level, model_used, summary_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ts, summary_text, period_start, period_end, transcription_count,
-         event_refs_json, themes_json, activity_level, model_used),
+         event_refs_json, themes_json, activity_level, model_used, summary_type),
     )
     row_id = cur.lastrowid
     conn.commit()
@@ -591,6 +597,7 @@ def _insert_summary(
         "key_themes": key_themes or [],
         "activity_level": activity_level,
         "model_used": model_used,
+        "summary_type": summary_type,
     }
 
 
@@ -604,10 +611,12 @@ async def insert_summary(
     key_themes: list | None,
     activity_level: str,
     model_used: str | None,
+    summary_type: str = "10min",
 ) -> dict:
     return await asyncio.to_thread(
         _insert_summary, db_path, summary_text, period_start, period_end,
         transcription_count, event_references, key_themes, activity_level, model_used,
+        summary_type,
     )
 
 
@@ -643,3 +652,35 @@ def _get_summaries(db_path: str, hours: float | None = None, limit: int = 100, o
 
 async def get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
     return await asyncio.to_thread(_get_summaries, db_path, hours, limit, offset)
+
+
+def _parse_summary_json(d: dict) -> dict:
+    """Parse JSON string fields in a summary row dict."""
+    try:
+        d["event_references"] = json.loads(d["event_references"]) if d.get("event_references") else []
+    except (json.JSONDecodeError, TypeError):
+        d["event_references"] = []
+    try:
+        d["key_themes"] = json.loads(d["key_themes"]) if d.get("key_themes") else []
+    except (json.JSONDecodeError, TypeError):
+        d["key_themes"] = []
+    return d
+
+
+def _get_latest_summaries(db_path: str) -> dict:
+    """Return the most recent summary of each type ('10min' and 'hourly')."""
+    conn = _get_conn(db_path)
+    result = {"recent": None, "hourly": None}
+    for summary_type, key in [("10min", "recent"), ("hourly", "hourly")]:
+        row = conn.execute(
+            "SELECT * FROM summaries WHERE summary_type = ? ORDER BY timestamp DESC LIMIT 1",
+            (summary_type,),
+        ).fetchone()
+        if row:
+            result[key] = _parse_summary_json(dict(row))
+    conn.close()
+    return result
+
+
+async def get_latest_summaries(db_path: str) -> dict:
+    return await asyncio.to_thread(_get_latest_summaries, db_path)

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
 from config import config
-from database import get_transcriptions, get_transcription, get_alerts, get_counts, get_events, get_event_with_alerts, get_events_with_location, get_summaries
+from database import get_transcriptions, get_transcription, get_alerts, get_counts, get_events, get_event_with_alerts, get_events_with_location, get_summaries, get_latest_summaries
 from analyzer import fetch_models, get_base_prompt
 
 router = APIRouter(prefix="/api")
@@ -53,6 +53,11 @@ async def list_map_events(
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     rows = await get_events_with_location(config.db_path, limit, status if status else None, since)
     return {"events": rows}
+
+
+@router.get("/summaries/current")
+async def current_summaries():
+    return await get_latest_summaries(config.db_path)
 
 
 @router.get("/summaries")

@@ -25,8 +25,7 @@ const PAUSE_SVG = '<svg viewBox="0 0 16 16"><rect x="3" y="2" width="3.5" height
 let peakHoldValue = 0;
 let peakDecayTimer = null;
 
-// Summaries state
-let summariesRangeHours = 1;
+// Summaries state (no longer needed but keep section marker)
 
 // Map state
 let map = null;
@@ -624,54 +623,37 @@ function createSummaryCard(s) {
     return card;
 }
 
-function addSummaryToFeed(data) {
-    const list = document.getElementById("summaries-list");
-    if (!list) return;
-
-    // Dedup check
-    if (data.id && document.getElementById(`summary-${data.id}`)) return;
-
-    const empty = list.querySelector(".empty-state");
-    if (empty) empty.remove();
-
+function renderSummaryToSlot(slotId, data) {
+    const slot = document.getElementById(slotId);
+    if (!slot) return;
+    slot.innerHTML = "";
     const card = createSummaryCard(data);
-    list.prepend(card);
+    slot.appendChild(card);
     card.classList.add("pulse");
     setTimeout(() => card.classList.remove("pulse"), 800);
 }
 
+function addSummaryToFeed(data) {
+    const summaryType = data.summary_type || "10min";
+    const slotId = summaryType === "hourly" ? "summary-hourly" : "summary-recent";
+    renderSummaryToSlot(slotId, data);
+}
+
 async function loadSummaries() {
-    const list = document.getElementById("summaries-list");
-    if (!list) return;
-
     try {
-        const resp = await fetch(`/api/summaries?hours=${summariesRangeHours}&limit=100`);
+        const resp = await fetch("/api/summaries/current");
         const data = await resp.json();
-        const summaries = data.summaries || [];
 
-        list.innerHTML = "";
-        if (summaries.length === 0) {
-            list.innerHTML = '<div class="empty-state">No summaries yet. Summaries are generated every 5 minutes.</div>';
-            return;
+        if (data.recent) {
+            renderSummaryToSlot("summary-recent", data.recent);
         }
-
-        summaries.forEach(s => {
-            list.appendChild(createSummaryCard(s));
-        });
+        if (data.hourly) {
+            renderSummaryToSlot("summary-hourly", data.hourly);
+        }
     } catch (e) {
         console.error("Failed to load summaries:", e);
     }
 }
-
-// Summaries range button handlers
-document.querySelectorAll(".summaries-range-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-        document.querySelectorAll(".summaries-range-btn").forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        summariesRangeHours = parseFloat(btn.dataset.hours);
-        loadSummaries();
-    });
-});
 
 // --- Map ---
 
