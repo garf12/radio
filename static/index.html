@@ -30,7 +30,7 @@
     <div class="tabs">
         <div class="tab active" data-tab="live">Live</div>
         <div class="tab" data-tab="events">Events</div>
-        <div class="tab" data-tab="history">History</div>
+        <div class="tab" data-tab="summaries">Summaries</div>
         <div class="tab" data-tab="map">Map</div>
         <div class="tab" data-tab="config">Settings</div>
     </div>
@@ -67,12 +67,20 @@
             </div>
         </div>
 
-        <!-- History Panel -->
-        <div class="panel history-panel" id="panel-history">
-            <h2>Transcription History</h2>
-            <div id="history-list"></div>
-            <div class="load-more">
-                <button class="btn" id="load-more-btn" onclick="loadHistory()">Load More</button>
+        <!-- Summaries Panel -->
+        <div class="panel summaries-panel" id="panel-summaries">
+            <div class="summaries-toolbar">
+                <h2>Situation Summaries</h2>
+                <div class="summaries-range-buttons">
+                    <button class="summaries-range-btn active" data-hours="1">1h</button>
+                    <button class="summaries-range-btn" data-hours="2">2h</button>
+                    <button class="summaries-range-btn" data-hours="4">4h</button>
+                    <button class="summaries-range-btn" data-hours="12">12h</button>
+                    <button class="summaries-range-btn" data-hours="24">24h</button>
+                </div>
+            </div>
+            <div id="summaries-list">
+                <div class="empty-state">No summaries yet. Summaries are generated every 5 minutes.</div>
             </div>
         </div>
 
@@ -121,9 +129,11 @@
                 <label>Whisper Model</label>
                 <select id="cfg-whisper">
                     <option value="tiny">tiny (fastest)</option>
-                    <option value="base" selected>base (recommended)</option>
+                    <option value="base" selected>base</option>
                     <option value="small">small (better accuracy)</option>
                     <option value="medium">medium (high accuracy)</option>
+                    <option value="large-v3">large-v3 (best accuracy)</option>
+                    <option value="turbo">turbo (fast + accurate)</option>
                 </select>
             </div>
             <div class="form-group">

@@ -144,6 +144,108 @@ async def analyze_transcript(
         return None
 
 
+SUMMARY_SYSTEM_PROMPT = """You are a police radio situation analyst. You are given the last ~10 minutes of police/emergency radio transcripts. Produce a brief situational summary that gives a holistic view of current activity — NOT individual incident alerts.
+
+Focus on:
+- Overall activity level and tone of radio traffic
+- Key themes or patterns (e.g. "multiple traffic stops in the south side", "quiet night with routine patrols")
+- Any ongoing situations or developing patterns
+- General area(s) of activity if mentioned
+
+{active_events_section}
+
+Respond with ONLY a JSON object (no markdown, no code fences):
+{{
+  "summary": "2-4 sentence overview of the current situation and radio activity",
+  "key_themes": ["theme1", "theme2"],
+  "activity_level": "quiet|moderate|busy|intense"
+}}
+
+activity_level guide:
+- "quiet": minimal radio traffic, routine checks only
+- "moderate": normal activity, a few calls
+- "busy": elevated activity, multiple ongoing calls
+- "intense": high volume of significant incidents"""
+
+
+async def generate_summary(
+    transcripts: list[dict],
+    api_key: str,
+    model: str = "google/gemini-2.0-flash-001",
+    active_events: list[dict] | None = None,
+) -> dict | None:
+    """Generate a situational summary from recent transcripts. Returns dict or None."""
+    if not transcripts or not api_key:
+        return None
+
+    if active_events:
+        event_lines = []
+        for ev in active_events:
+            loc = ev.get('location_text') or ''
+            loc_part = f" at {loc}" if loc else ""
+            event_lines.append(f"- [{ev['category']}] {ev['title']}{loc_part} (severity: {ev['severity']})")
+        active_events_section = "Currently active events for context:\n" + "\n".join(event_lines)
+    else:
+        active_events_section = ""
+
+    system_content = SUMMARY_SYSTEM_PROMPT.format(active_events_section=active_events_section)
+
+    # Format transcripts with timestamps
+    transcript_lines = []
+    for t in transcripts:
+        ts = t.get("timestamp", "")
+        text = t.get("text", "")
+        transcript_lines.append(f"[{ts}] {text}")
+    combined = "\n".join(transcript_lines)
+
+    client = AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+    )
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": f"Summarize the current situation from these recent radio transcripts:\n\n{combined}"},
+            ],
+            temperature=0.2,
+            max_tokens=500,
+        )
+
+        content = response.choices[0].message.content.strip()
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+
+        # Extract JSON object
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1:
+            content = content[start:end + 1]
+
+        result = json.loads(content)
+        logger.info("Summary generated: activity_level=%s themes=%s",
+                     result.get("activity_level"), result.get("key_themes"))
+
+        return {
+            "summary_text": result.get("summary", ""),
+            "key_themes": result.get("key_themes", []),
+            "activity_level": result.get("activity_level", "moderate"),
+        }
+
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse summary response: %s", content)
+        return None
+    except Exception:
+        logger.exception("Error generating summary")
+        return None
+
+
 async def fetch_models(api_key: str) -> list[dict]:
     """Fetch available models from OpenRouter."""
     if not api_key:

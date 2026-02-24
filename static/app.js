@@ -4,8 +4,10 @@ let transcriptCount = 0;
 let alertCount = 0;
 let eventCount = 0;
 let eventsActive = 0;
-let historyOffset = 0;
-const HISTORY_PAGE = 50;
+let liveFeedOffset = 0;
+let liveFeedLoading = false;
+let liveFeedDone = false;
+const FEED_PAGE = 50;
 
 // Audio playback state
 let currentPlayBtn = null;
@@ -22,6 +24,9 @@ const PAUSE_SVG = '<svg viewBox="0 0 16 16"><rect x="3" y="2" width="3.5" height
 // Audio meter state
 let peakHoldValue = 0;
 let peakDecayTimer = null;
+
+// Summaries state
+let summariesRangeHours = 1;
 
 // Map state
 let map = null;
@@ -207,6 +212,8 @@ function connectWS() {
             updateChunkStatus(msg.data);
         } else if (msg.type === "audio_level") {
             updateAudioMeter(msg.data);
+        } else if (msg.type === "summary") {
+            addSummaryToFeed(msg.data);
         }
     };
 }
@@ -234,11 +241,6 @@ function addTranscription(data) {
         <div class="text">${escapeHtml(data.text)}</div>
     `;
     list.prepend(el);
-
-    // Keep max 100 items in live feed
-    while (list.children.length > 100) {
-        list.removeChild(list.lastChild);
-    }
 
     transcriptCount++;
     updateCounts();
@@ -423,9 +425,9 @@ document.querySelectorAll(".tab").forEach((tab) => {
         document.getElementById(`panel-${tab.dataset.tab}`).classList.add("active");
 
         if (tab.dataset.tab === "config") loadConfig();
-        if (tab.dataset.tab === "history" && historyOffset === 0) loadHistory();
         if (tab.dataset.tab === "map") initMapPanel();
         if (tab.dataset.tab === "events") initEventsPanel();
+        if (tab.dataset.tab === "summaries") loadSummaries();
     });
 });
 
@@ -495,40 +497,52 @@ async function saveConfig() {
     }
 }
 
-// --- History ---
+// --- Infinite scroll: load older transcriptions ---
 
-async function loadHistory() {
+async function loadOlderTranscriptions() {
+    if (liveFeedLoading || liveFeedDone) return;
+    liveFeedLoading = true;
     try {
-        const resp = await fetch(`/api/transcriptions?limit=${HISTORY_PAGE}&offset=${historyOffset}`);
+        const resp = await fetch(`/api/transcriptions?limit=${FEED_PAGE}&offset=${liveFeedOffset}`);
         const data = await resp.json();
-        const list = document.getElementById("history-list");
+        const list = document.getElementById("transcript-list");
 
-        if (data.transcriptions.length === 0 && historyOffset === 0) {
-            list.innerHTML = '<div class="empty-state">No transcription history</div>';
+        if (data.transcriptions.length === 0) {
+            liveFeedDone = true;
             return;
         }
 
+        // API returns newest-first, append to bottom (older items)
         data.transcriptions.forEach((t) => {
+            if (t.id && document.getElementById(`t-${t.id}`)) return;
             const el = document.createElement("div");
             el.className = "transcript-item";
-            const hasAudio = t.audio_file;
+            if (t.id) el.id = `t-${t.id}`;
             el.innerHTML = `
                 <div class="item-header">
                     <span class="time">${formatTime(t.timestamp)}</span>
-                    ${hasAudio ? playBtnHtml(t.id) : ""}
+                    ${t.audio_file ? playBtnHtml(t.id) : ""}
                 </div>
                 <div class="text">${escapeHtml(t.text)}</div>
             `;
             list.appendChild(el);
         });
 
-        historyOffset += data.transcriptions.length;
-        document.getElementById("load-more-btn").style.display =
-            data.transcriptions.length < HISTORY_PAGE ? "none" : "";
+        liveFeedOffset += data.transcriptions.length;
+        if (data.transcriptions.length < FEED_PAGE) liveFeedDone = true;
     } catch (e) {
-        console.error("Failed to load history:", e);
+        console.error("Failed to load older transcriptions:", e);
+    } finally {
+        liveFeedLoading = false;
     }
 }
+
+document.getElementById("feed").addEventListener("scroll", (e) => {
+    const el = e.target;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
+        loadOlderTranscriptions();
+    }
+});
 
 // --- Status polling ---
 
@@ -585,6 +599,79 @@ function escapeHtml(str) {
     div.textContent = str;
     return div.innerHTML;
 }
+
+// --- Summaries ---
+
+function createSummaryCard(s) {
+    const card = document.createElement("div");
+    card.className = `summary-card ${s.activity_level || 'moderate'}`;
+    card.id = `summary-${s.id}`;
+
+    const timeRange = `${formatTime(s.period_start)} – ${formatTime(s.period_end)}`;
+    const themes = (s.key_themes || []).map(t => `<span class="summary-theme">${escapeHtml(t)}</span>`).join("");
+
+    card.innerHTML = `
+        <div class="summary-header">
+            <span class="summary-time-range">${timeRange}</span>
+            <span class="activity-badge ${s.activity_level || 'moderate'}">${s.activity_level || 'moderate'}</span>
+        </div>
+        <div class="summary-text">${escapeHtml(s.summary_text)}</div>
+        <div class="summary-meta">
+            <span>${s.transcription_count || 0} transcriptions</span>
+            ${themes}
+        </div>
+    `;
+    return card;
+}
+
+function addSummaryToFeed(data) {
+    const list = document.getElementById("summaries-list");
+    if (!list) return;
+
+    // Dedup check
+    if (data.id && document.getElementById(`summary-${data.id}`)) return;
+
+    const empty = list.querySelector(".empty-state");
+    if (empty) empty.remove();
+
+    const card = createSummaryCard(data);
+    list.prepend(card);
+    card.classList.add("pulse");
+    setTimeout(() => card.classList.remove("pulse"), 800);
+}
+
+async function loadSummaries() {
+    const list = document.getElementById("summaries-list");
+    if (!list) return;
+
+    try {
+        const resp = await fetch(`/api/summaries?hours=${summariesRangeHours}&limit=100`);
+        const data = await resp.json();
+        const summaries = data.summaries || [];
+
+        list.innerHTML = "";
+        if (summaries.length === 0) {
+            list.innerHTML = '<div class="empty-state">No summaries yet. Summaries are generated every 5 minutes.</div>';
+            return;
+        }
+
+        summaries.forEach(s => {
+            list.appendChild(createSummaryCard(s));
+        });
+    } catch (e) {
+        console.error("Failed to load summaries:", e);
+    }
+}
+
+// Summaries range button handlers
+document.querySelectorAll(".summaries-range-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".summaries-range-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        summariesRangeHours = parseFloat(btn.dataset.hours);
+        loadSummaries();
+    });
+});
 
 // --- Map ---
 
@@ -783,7 +870,7 @@ function updateMapFromEvent(eventData) {
 async function loadLiveFeed() {
     try {
         const [tResp, evResp] = await Promise.all([
-            fetch("/api/transcriptions?limit=50&offset=0"),
+            fetch(`/api/transcriptions?limit=${FEED_PAGE}&offset=0`),
             fetch("/api/events?limit=50&offset=0"),
         ]);
         const tData = await tResp.json();
@@ -810,6 +897,9 @@ async function loadLiveFeed() {
                 `;
                 list.prepend(el);
             });
+
+            liveFeedOffset = tData.transcriptions.length;
+            if (tData.transcriptions.length < FEED_PAGE) liveFeedDone = true;
         }
 
         // Events: load with alert counts, fetch full alerts on expand

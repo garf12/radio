@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -79,6 +80,19 @@ def init_db(db_path: str) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            summary_text TEXT NOT NULL,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            transcription_count INTEGER NOT NULL DEFAULT 0,
+            event_references TEXT,
+            key_themes TEXT,
+            activity_level TEXT DEFAULT 'moderate',
+            model_used TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_summaries_ts ON summaries(timestamp);
     """)
     conn.close()
 
@@ -330,8 +344,12 @@ def _get_counts(db_path: str) -> dict:
     a_count = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
     e_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     e_active = conn.execute("SELECT COUNT(*) FROM events WHERE status = 'active'").fetchone()[0]
+    try:
+        s_count = conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0]
+    except sqlite3.OperationalError:
+        s_count = 0
     conn.close()
-    return {"transcriptions": t_count, "alerts": a_count, "events": e_count, "events_active": e_active}
+    return {"transcriptions": t_count, "alerts": a_count, "events": e_count, "events_active": e_active, "summaries": s_count}
 
 
 async def get_counts(db_path: str) -> dict:
@@ -518,3 +536,110 @@ def load_settings(db_path: str) -> dict:
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     conn.close()
     return {r["key"]: r["value"] for r in rows}
+
+
+# --- Summaries ---
+
+
+def _get_recent_transcriptions(db_path: str, minutes: int = 10) -> list[dict]:
+    conn = _get_conn(db_path)
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM transcriptions WHERE timestamp >= ? ORDER BY timestamp ASC",
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+async def get_recent_transcriptions(db_path: str, minutes: int = 10) -> list[dict]:
+    return await asyncio.to_thread(_get_recent_transcriptions, db_path, minutes)
+
+
+def _insert_summary(
+    db_path: str,
+    summary_text: str,
+    period_start: str,
+    period_end: str,
+    transcription_count: int,
+    event_references: list | None,
+    key_themes: list | None,
+    activity_level: str,
+    model_used: str | None,
+) -> dict:
+    conn = _get_conn(db_path)
+    ts = datetime.now(timezone.utc).isoformat()
+    event_refs_json = json.dumps(event_references) if event_references else None
+    themes_json = json.dumps(key_themes) if key_themes else None
+    cur = conn.execute(
+        "INSERT INTO summaries (timestamp, summary_text, period_start, period_end, transcription_count, "
+        "event_references, key_themes, activity_level, model_used) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, summary_text, period_start, period_end, transcription_count,
+         event_refs_json, themes_json, activity_level, model_used),
+    )
+    row_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return {
+        "id": row_id,
+        "timestamp": ts,
+        "summary_text": summary_text,
+        "period_start": period_start,
+        "period_end": period_end,
+        "transcription_count": transcription_count,
+        "event_references": event_references or [],
+        "key_themes": key_themes or [],
+        "activity_level": activity_level,
+        "model_used": model_used,
+    }
+
+
+async def insert_summary(
+    db_path: str,
+    summary_text: str,
+    period_start: str,
+    period_end: str,
+    transcription_count: int,
+    event_references: list | None,
+    key_themes: list | None,
+    activity_level: str,
+    model_used: str | None,
+) -> dict:
+    return await asyncio.to_thread(
+        _insert_summary, db_path, summary_text, period_start, period_end,
+        transcription_count, event_references, key_themes, activity_level, model_used,
+    )
+
+
+def _get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
+    conn = _get_conn(db_path)
+    if hours is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        rows = conn.execute(
+            "SELECT * FROM summaries WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (cutoff, limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM summaries ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        d = dict(r)
+        # Parse JSON strings to lists
+        try:
+            d["event_references"] = json.loads(d["event_references"]) if d.get("event_references") else []
+        except (json.JSONDecodeError, TypeError):
+            d["event_references"] = []
+        try:
+            d["key_themes"] = json.loads(d["key_themes"]) if d.get("key_themes") else []
+        except (json.JSONDecodeError, TypeError):
+            d["key_themes"] = []
+        results.append(d)
+    return results
+
+
+async def get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
+    return await asyncio.to_thread(_get_summaries, db_path, hours, limit, offset)

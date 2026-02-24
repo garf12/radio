@@ -15,10 +15,11 @@ from database import (
     init_db, insert_transcription, insert_alert,
     get_active_events, insert_event, update_event, link_alert_to_event, get_event_with_alerts,
     auto_resolve_stale_events, find_matching_event,
+    get_recent_transcriptions, insert_summary,
 )
 from stream_capture import read_chunks, audio_to_wav_bytes
 from transcriber import transcribe_chunk
-from analyzer import analyze_transcript
+from analyzer import analyze_transcript, generate_summary
 from geocoder import geocode_location
 from websocket_manager import ws_manager
 from routes.api import router as api_router
@@ -40,6 +41,7 @@ _last_chunk_time: str | None = None
 _chunks_processed: int = 0
 _silent_chunks: int = 0
 _last_stale_check: datetime | None = None
+_last_summary_time: datetime | None = None
 
 
 def pipeline_status() -> dict:
@@ -88,6 +90,7 @@ async def run_pipeline() -> None:
     _pipeline_error = None
     transcript_window: deque[str] = deque(maxlen=4)  # ~4 chunks = ~2 min at 30s
     recent_alerts: deque[str] = deque(maxlen=10)  # track recent alert summaries to avoid duplicates
+    _cooldown_chunks = 0  # skip analysis for N chunks after an alert fires
 
     # Ensure audio directory exists
     os.makedirs(config.audio_dir, exist_ok=True)
@@ -136,8 +139,11 @@ async def run_pipeline() -> None:
                 # Add to rolling window for analysis
                 transcript_window.append(text)
 
-                # Analyze rolling window
-                if config.openrouter_api_key:
+                # Analyze rolling window (skip if cooling down from recent alert)
+                if _cooldown_chunks > 0:
+                    _cooldown_chunks -= 1
+                    logger.debug("Skipping analysis, cooldown=%d", _cooldown_chunks)
+                elif config.openrouter_api_key:
                     combined = "\n".join(transcript_window)
                     active_events = await get_active_events(config.db_path)
                     result = await analyze_transcript(
@@ -247,6 +253,10 @@ async def run_pipeline() -> None:
                             result["summary"],
                         )
 
+                        # Cooldown: skip analysis for 2 chunks so the overlapping
+                        # window moves past this incident before re-analyzing
+                        _cooldown_chunks = 2
+
             except Exception:
                 logger.exception("Error processing chunk")
 
@@ -255,6 +265,12 @@ async def run_pipeline() -> None:
                 await _check_stale_events()
             except Exception:
                 logger.exception("Error in stale event check")
+
+            # Generate periodic situation summary
+            try:
+                await _generate_periodic_summary()
+            except Exception:
+                logger.exception("Error generating periodic summary")
 
     except Exception as e:
         _pipeline_error = str(e)
@@ -276,6 +292,49 @@ async def _check_stale_events() -> None:
         full_event = await get_event_with_alerts(config.db_path, ev["id"])
         await ws_manager.broadcast({"type": "event", "data": full_event})
         logger.info("Auto-resolved stale event %d: %s", ev["id"], ev.get("title", ""))
+
+
+async def _generate_periodic_summary() -> None:
+    global _last_summary_time
+    if not config.openrouter_api_key:
+        return
+    now = datetime.now(timezone.utc)
+    if _last_summary_time and (now - _last_summary_time).total_seconds() < 300:
+        return
+    _last_summary_time = now
+
+    transcripts = await get_recent_transcriptions(config.db_path, minutes=10)
+    if not transcripts:
+        return
+
+    active_events = await get_active_events(config.db_path)
+    result = await generate_summary(
+        transcripts,
+        config.openrouter_api_key,
+        config.analysis_model,
+        active_events=active_events,
+    )
+    if not result:
+        return
+
+    period_start = transcripts[0]["timestamp"]
+    period_end = transcripts[-1]["timestamp"]
+    event_refs = [e["id"] for e in active_events] if active_events else []
+
+    summary = await insert_summary(
+        config.db_path,
+        result["summary_text"],
+        period_start,
+        period_end,
+        len(transcripts),
+        event_refs,
+        result["key_themes"],
+        result["activity_level"],
+        config.analysis_model,
+    )
+
+    await ws_manager.broadcast({"type": "summary", "data": summary})
+    logger.info("Summary generated: activity_level=%s", result["activity_level"])
 
 
 def _write_file(path: str, data: bytes) -> None:
