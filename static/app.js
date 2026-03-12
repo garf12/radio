@@ -9,6 +9,11 @@ let liveFeedLoading = false;
 let liveFeedDone = false;
 const FEED_PAGE = 50;
 
+// Stream state
+let selectedStreamId = "";  // empty = "All Streams"
+let streamsData = [];       // array from API
+let streamColorMap = {};    // stream_id -> color
+
 // Audio playback state
 let currentPlayBtn = null;
 const sharedAudio = document.getElementById("shared-audio");
@@ -108,7 +113,7 @@ function toggleLiveAudio() {
 
         const btn = document.getElementById("live-listen-btn");
         const icon = document.getElementById("live-listen-icon");
-        liveAudio.src = "/api/stream";
+        liveAudio.src = selectedStreamId ? `/api/stream?stream_id=${selectedStreamId}` : "/api/stream";
         liveAudio.play().then(() => {
             liveAudioPlaying = true;
             btn.classList.add("listening");
@@ -172,11 +177,220 @@ function updateAudioMeter(data) {
     document.getElementById("audio-meter-db").textContent = dbText;
 }
 
+// --- VAD Indicator ---
+
+function updateVadIndicator(state) {
+    const el = document.getElementById("vad-indicator");
+    if (!el) return;
+    el.classList.remove("vad-waiting", "vad-recording", "vad-grace");
+    if (state === "recording" || state === "grace_period") {
+        el.textContent = "RECEIVING";
+        el.classList.add(state === "recording" ? "vad-recording" : "vad-grace");
+    } else {
+        el.textContent = "STANDBY";
+        el.classList.add("vad-waiting");
+    }
+}
+
+// --- Stream Functions ---
+
+function getStreamName(streamId) {
+    if (!streamId) return "";
+    const s = streamsData.find(s => s.id === streamId);
+    return s ? s.name : streamId;
+}
+
+function getStreamColor(streamId) {
+    return streamColorMap[streamId] || "#00e89d";
+}
+
+function streamTagHtml(streamId) {
+    if (!streamId || streamsData.length <= 1) return "";
+    const name = getStreamName(streamId);
+    const color = getStreamColor(streamId);
+    return `<span class="stream-tag" style="--stream-color: ${color}">${escapeHtml(name)}</span>`;
+}
+
+async function loadStreams() {
+    try {
+        const resp = await fetch("/api/streams");
+        const data = await resp.json();
+        streamsData = data.streams || [];
+        streamColorMap = {};
+        streamsData.forEach(s => { streamColorMap[s.id] = s.color || "#00e89d"; });
+
+        const select = document.getElementById("stream-select");
+        // Preserve current selection
+        const prev = select.value;
+        select.innerHTML = '<option value="">All Streams</option>';
+        streamsData.forEach(s => {
+            const opt = document.createElement("option");
+            opt.value = s.id;
+            opt.textContent = s.name + (s.enabled ? "" : " (disabled)");
+            opt.style.color = s.color;
+            select.appendChild(opt);
+        });
+        // Hide selector if only one stream
+        select.parentElement.style.display = streamsData.length <= 1 ? "none" : "";
+        if (prev && streamsData.some(s => s.id === prev)) {
+            select.value = prev;
+        }
+    } catch (e) {
+        console.error("Failed to load streams:", e);
+    }
+}
+
+function onStreamChange() {
+    const prev = selectedStreamId;
+    selectedStreamId = document.getElementById("stream-select").value;
+    // Re-filter visible items
+    filterFeedByStream();
+    // Reset and reload live feed if stream changed
+    if (prev !== selectedStreamId) {
+        liveFeedOffset = 0;
+        liveFeedDone = false;
+        document.getElementById("transcript-list").innerHTML = '<div class="empty-state">Loading...</div>';
+        document.getElementById("event-list").innerHTML = '<div class="empty-state">Loading...</div>';
+        eventsPanelInitialized = false;
+        loadLiveFeed();
+        // Update live audio source
+        if (liveAudioPlaying) {
+            stopLiveAudio();
+        }
+    }
+    // Reload map if visible
+    if (mapLoaded) loadMapEvents();
+}
+
+function filterFeedByStream() {
+    // Filter transcript items
+    const tList = document.getElementById("transcript-list");
+    tList.querySelectorAll(".transcript-item").forEach(el => {
+        if (!selectedStreamId || el.dataset.streamId === selectedStreamId) {
+            el.style.display = "";
+        } else {
+            el.style.display = "none";
+        }
+    });
+    // Filter event cards in sidebar
+    const eList = document.getElementById("event-list");
+    eList.querySelectorAll(".event-card").forEach(el => {
+        if (!selectedStreamId || el.dataset.streamId === selectedStreamId) {
+            el.style.display = "";
+        } else {
+            el.style.display = "none";
+        }
+    });
+}
+
+// --- Stream Management (Settings) ---
+
+
 // --- Play button HTML helper ---
 
 function playBtnHtml(transcriptionId) {
     if (!transcriptionId) return "";
     return `<button class="play-btn" onclick="playAudio(${transcriptionId}, this)">${PLAY_SVG}Play</button>`;
+}
+
+// --- Export Video ---
+
+const VIDEO_SVG = '<svg viewBox="0 0 16 16"><path d="M2 3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3zm9.5 5L8 5.5v5L11.5 8z"/></svg>';
+let exportTranscriptionId = null;
+
+function exportBtnHtml(transcriptionId) {
+    if (!transcriptionId) return "";
+    return `<button class="export-btn" onclick="openExportModal(${transcriptionId})">${VIDEO_SVG}Video</button>`;
+}
+
+function openExportModal(transcriptionId) {
+    exportTranscriptionId = transcriptionId;
+    const modal = document.getElementById("export-modal");
+    document.getElementById("export-text").value = "";
+    document.getElementById("export-bg").value = "";
+    const picker = document.getElementById("bg-picker");
+    picker.classList.remove("has-file");
+    document.getElementById("bg-picker-label").textContent = "Click to select image...";
+    const status = document.getElementById("export-status");
+    status.style.display = "none";
+    status.className = "export-status";
+    document.getElementById("export-generate-btn").disabled = false;
+    modal.style.display = "";
+}
+
+function onBgFileChange(input) {
+    const picker = document.getElementById("bg-picker");
+    const label = document.getElementById("bg-picker-label");
+    if (input.files && input.files[0]) {
+        picker.classList.add("has-file");
+        label.textContent = input.files[0].name;
+    } else {
+        picker.classList.remove("has-file");
+        label.textContent = "Click to select image...";
+    }
+}
+
+function closeExportModal() {
+    document.getElementById("export-modal").style.display = "none";
+    exportTranscriptionId = null;
+}
+
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeExportModal();
+});
+
+async function generateVideo() {
+    if (!exportTranscriptionId) return;
+
+    const btn = document.getElementById("export-generate-btn");
+    const status = document.getElementById("export-status");
+    const spinner = document.getElementById("export-spinner");
+    const statusText = document.getElementById("export-status-text");
+
+    btn.disabled = true;
+    status.style.display = "flex";
+    status.className = "export-status";
+    spinner.style.display = "";
+    statusText.textContent = "Generating video...";
+
+    const text = document.getElementById("export-text").value;
+    const bgFile = document.getElementById("export-bg").files[0];
+
+    const formData = new FormData();
+    formData.append("text", text);
+    if (bgFile) formData.append("background", bgFile);
+
+    try {
+        const resp = await fetch(`/api/video/${exportTranscriptionId}`, {
+            method: "POST",
+            body: formData,
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({ detail: "Video generation failed" }));
+            throw new Error(err.detail || "Video generation failed");
+        }
+
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `scanner_${exportTranscriptionId}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        spinner.style.display = "none";
+        status.className = "export-status success";
+        statusText.textContent = "Video downloaded!";
+        btn.disabled = false;
+    } catch (e) {
+        spinner.style.display = "none";
+        status.className = "export-status error";
+        statusText.textContent = e.message || "Failed to generate video";
+        btn.disabled = false;
+    }
 }
 
 // --- WebSocket ---
@@ -206,13 +420,28 @@ function connectWS() {
             addAlert(msg.data);
         } else if (msg.type === "event") {
             handleEvent(msg.data);
-            updateMapFromEvent(msg.data);
+            if (!selectedStreamId || (msg.data && msg.data.stream_id === selectedStreamId)) {
+                updateMapFromEvent(msg.data);
+            }
         } else if (msg.type === "status") {
             updateChunkStatus(msg.data);
         } else if (msg.type === "audio_level") {
-            updateAudioMeter(msg.data);
+            if (!selectedStreamId || msg.data.stream_id === selectedStreamId) {
+                updateAudioMeter(msg.data);
+            }
+        } else if (msg.type === "vad_state") {
+            if (!selectedStreamId || msg.data.stream_id === selectedStreamId) {
+                updateVadIndicator(msg.data.state);
+            }
         } else if (msg.type === "summary") {
             addSummaryToFeed(msg.data);
+        } else if (msg.type === "feedback") {
+            // Update feedback state in UI if visible
+            const fbContainer = document.getElementById(`fb-${msg.data.alert_id}`);
+            if (fbContainer) {
+                const label = msg.data.feedback_type === "correct" ? "Confirmed" : msg.data.feedback_type === "false_positive" ? "Marked FP" : "Corrected";
+                fbContainer.innerHTML = `<span class="feedback-done ${msg.data.feedback_type}">${label}</span>`;
+            }
         }
     };
 }
@@ -225,17 +454,29 @@ function addTranscription(data) {
     // Dedup: skip if already rendered
     if (data.id && document.getElementById(`t-${data.id}`)) return;
 
+    // Filter: hide if doesn't match selected stream
+    const visible = !selectedStreamId || data.stream_id === selectedStreamId;
+
     const empty = list.querySelector(".empty-state");
     if (empty) empty.remove();
 
     const el = document.createElement("div");
     el.className = "transcript-item";
     if (data.id) el.id = `t-${data.id}`;
+    if (data.stream_id) el.dataset.streamId = data.stream_id;
+    if (!visible) el.style.display = "none";
+
+    const confidencePct = data.confidence != null ? Math.round(data.confidence * 100) : null;
+    const confidenceBadge = confidencePct != null
+        ? `<span class="confidence-badge ${confidencePct > 60 ? 'good' : confidencePct > 30 ? 'warn' : 'poor'}">${confidencePct}%</span>`
+        : "";
+    const reviewBadge = data.needs_review ? '<span class="review-badge">Review</span>' : "";
+    const sTag = streamTagHtml(data.stream_id);
 
     el.innerHTML = `
         <div class="item-header">
-            <span class="time">${formatTime(data.timestamp)}</span>
-            ${data.audio_file ? playBtnHtml(data.id) : ""}
+            <span class="time">${formatTime(data.timestamp)}${sTag}</span>
+            <span class="transcript-badges">${confidenceBadge}${reviewBadge}${data.audio_file ? playBtnHtml(data.id) + exportBtnHtml(data.id) : ""}</span>
         </div>
         <div class="text">${escapeHtml(data.text)}</div>
     `;
@@ -269,6 +510,11 @@ function handleEvent(eventData) {
     renderEventToContainer(eventData, "event-list", "event-");
     renderEventToContainer(eventData, "events-panel-list", "ep-event-");
     applyEventsFilter();
+    // Apply stream filter to sidebar
+    if (selectedStreamId && eventData.stream_id !== selectedStreamId) {
+        const sidebarCard = document.getElementById("event-" + eventData.id);
+        if (sidebarCard) sidebarCard.style.display = "none";
+    }
 }
 
 function renderEventToContainer(eventData, containerId, idPrefix) {
@@ -300,12 +546,18 @@ function createEventCard(ev, idPrefix) {
     card.className = `event-card ${ev.severity}`;
     card.id = idPrefix + ev.id;
     card.dataset.status = ev.status;
+    if (ev.stream_id) card.dataset.streamId = ev.stream_id;
 
     const cardElementId = idPrefix + ev.id;
     const alertCount = ev.alerts ? ev.alerts.length : (ev.alert_count || 0);
     const timeRange = ev.alerts && ev.alerts.length > 0
         ? `${formatTime(ev.alerts[0].timestamp)} – ${formatTime(ev.alerts[ev.alerts.length - 1].timestamp)}`
         : formatTime(ev.created_at);
+    const sTag = streamTagHtml(ev.stream_id);
+
+    const audioBtn = ev.audio_transcription_id
+        ? playBtnHtml(ev.audio_transcription_id)
+        : "";
 
     card.innerHTML = `
         <div class="event-header" onclick="toggleEvent('${cardElementId}', ${ev.id})">
@@ -313,6 +565,7 @@ function createEventCard(ev, idPrefix) {
                 <div class="event-header-badges">
                     <span class="alert-badge ${ev.severity}">${ev.severity}</span>
                     <span class="event-status ${ev.status}">${ev.status}</span>
+                    ${sTag}
                 </div>
                 <span class="event-expand-arrow">&#9660;</span>
             </div>
@@ -321,6 +574,7 @@ function createEventCard(ev, idPrefix) {
                 <span>${ev.category}</span>
                 <span>${alertCount} update${alertCount !== 1 ? 's' : ''}</span>
                 <span>${timeRange}</span>
+                ${audioBtn}
             </div>
         </div>
         <div class="event-alerts">
@@ -360,11 +614,9 @@ function applyEventsFilter() {
     if (!list) return;
     const cards = list.querySelectorAll(".event-card");
     cards.forEach(card => {
-        if (eventsFilter === 'all' || card.dataset.status === eventsFilter) {
-            card.style.display = '';
-        } else {
-            card.style.display = 'none';
-        }
+        const statusMatch = eventsFilter === 'all' || card.dataset.status === eventsFilter;
+        const streamMatch = !selectedStreamId || card.dataset.streamId === selectedStreamId;
+        card.style.display = (statusMatch && streamMatch) ? '' : 'none';
     });
 }
 
@@ -381,7 +633,9 @@ async function initEventsPanel() {
     if (eventsPanelInitialized) return;
     eventsPanelInitialized = true;
     try {
-        const resp = await fetch("/api/events?limit=50");
+        let url = "/api/events?limit=50";
+        if (selectedStreamId) url += `&stream_id=${selectedStreamId}`;
+        const resp = await fetch(url);
         const data = await resp.json();
         const events = data.events || [];
         // Render oldest first so newest ends up on top
@@ -401,14 +655,18 @@ function renderEventAlerts(alerts) {
         return '<div class="empty-state" style="padding:12px">No updates yet</div>';
     }
     return alerts.map(a => `
-        <div class="event-alert-item">
+        <div class="event-alert-item" id="alert-item-${a.id}">
             <div class="alert-header">
                 <span class="alert-badge ${a.severity}">${a.severity}</span>
                 <span class="time">${formatTime(a.timestamp)}</span>
             </div>
             <div class="summary">${escapeHtml(a.summary)}</div>
             <div class="alert-footer">
-                ${a.transcription_id ? playBtnHtml(a.transcription_id) : ""}
+                ${a.transcription_id ? playBtnHtml(a.transcription_id) + exportBtnHtml(a.transcription_id) : ""}
+                <div class="feedback-buttons" id="fb-${a.id}">
+                    <button class="feedback-btn correct" onclick="feedbackAlert(${a.id}, 'correct', this)" title="Correct alert">&#10003;</button>
+                    <button class="feedback-btn false-positive" onclick="feedbackAlert(${a.id}, 'false_positive', this)" title="False positive">&#10007;</button>
+                </div>
             </div>
         </div>
     `).join("");
@@ -416,85 +674,19 @@ function renderEventAlerts(alerts) {
 
 // --- Tabs ---
 
-document.querySelectorAll(".tab").forEach((tab) => {
+document.querySelectorAll(".tab[data-tab]").forEach((tab) => {
     tab.addEventListener("click", () => {
         document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
         document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
         tab.classList.add("active");
         document.getElementById(`panel-${tab.dataset.tab}`).classList.add("active");
 
-        if (tab.dataset.tab === "config") loadConfig();
         if (tab.dataset.tab === "map") initMapPanel();
         if (tab.dataset.tab === "events") initEventsPanel();
         if (tab.dataset.tab === "summaries") loadSummaries();
     });
 });
 
-// --- Config ---
-
-async function loadConfig() {
-    try {
-        const resp = await fetch("/api/config");
-        const cfg = await resp.json();
-        document.getElementById("cfg-stream-url").value = cfg.stream_url || "";
-        document.getElementById("cfg-whisper").value = cfg.whisper_model || "base";
-        document.getElementById("cfg-sensitivity").value = cfg.alert_sensitivity || "medium";
-        document.getElementById("cfg-system-prompt").value = cfg.system_prompt || "";
-        document.getElementById("cfg-custom-instructions").value = cfg.custom_instructions || "";
-        document.getElementById("cfg-map-lat").value = cfg.map_default_lat || "";
-        document.getElementById("cfg-map-lng").value = cfg.map_default_lng || "";
-
-        // Load models
-        const mResp = await fetch("/api/models");
-        const mData = await mResp.json();
-        const select = document.getElementById("cfg-model");
-        select.innerHTML = "";
-        if (mData.models.length === 0) {
-            select.innerHTML = '<option value="">No models (check API key)</option>';
-        } else {
-            mData.models.forEach((m) => {
-                const opt = document.createElement("option");
-                opt.value = m.id;
-                opt.textContent = m.name;
-                if (m.id === cfg.analysis_model) opt.selected = true;
-                select.appendChild(opt);
-            });
-        }
-    } catch (e) {
-        console.error("Failed to load config:", e);
-    }
-}
-
-async function saveConfig() {
-    const body = {
-        stream_url: document.getElementById("cfg-stream-url").value,
-        analysis_model: document.getElementById("cfg-model").value,
-        whisper_model: document.getElementById("cfg-whisper").value,
-        alert_sensitivity: document.getElementById("cfg-sensitivity").value,
-        custom_instructions: document.getElementById("cfg-custom-instructions").value,
-    };
-    const apiKey = document.getElementById("cfg-api-key").value;
-    if (apiKey) body.openrouter_api_key = apiKey;
-    const mapsApiKey = document.getElementById("cfg-maps-api-key").value;
-    if (mapsApiKey) body.google_maps_api_key = mapsApiKey;
-    const mapLat = document.getElementById("cfg-map-lat").value;
-    if (mapLat) body.map_default_lat = parseFloat(mapLat);
-    const mapLng = document.getElementById("cfg-map-lng").value;
-    if (mapLng) body.map_default_lng = parseFloat(mapLng);
-
-    try {
-        await fetch("/api/config", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-        });
-        const msg = document.getElementById("save-msg");
-        msg.classList.add("show");
-        setTimeout(() => msg.classList.remove("show"), 2000);
-    } catch (e) {
-        console.error("Failed to save config:", e);
-    }
-}
 
 // --- Infinite scroll: load older transcriptions ---
 
@@ -502,7 +694,9 @@ async function loadOlderTranscriptions() {
     if (liveFeedLoading || liveFeedDone) return;
     liveFeedLoading = true;
     try {
-        const resp = await fetch(`/api/transcriptions?limit=${FEED_PAGE}&offset=${liveFeedOffset}`);
+        let url = `/api/transcriptions?limit=${FEED_PAGE}&offset=${liveFeedOffset}`;
+        if (selectedStreamId) url += `&stream_id=${selectedStreamId}`;
+        const resp = await fetch(url);
         const data = await resp.json();
         const list = document.getElementById("transcript-list");
 
@@ -517,10 +711,15 @@ async function loadOlderTranscriptions() {
             const el = document.createElement("div");
             el.className = "transcript-item";
             if (t.id) el.id = `t-${t.id}`;
+            if (t.stream_id) el.dataset.streamId = t.stream_id;
+            const cPct = t.confidence != null ? Math.round(t.confidence * 100) : null;
+            const cBadge = cPct != null ? `<span class="confidence-badge ${cPct > 60 ? 'good' : cPct > 30 ? 'warn' : 'poor'}">${cPct}%</span>` : "";
+            const rBadge = t.needs_review ? '<span class="review-badge">Review</span>' : "";
+            const sTag = streamTagHtml(t.stream_id);
             el.innerHTML = `
                 <div class="item-header">
-                    <span class="time">${formatTime(t.timestamp)}</span>
-                    ${t.audio_file ? playBtnHtml(t.id) : ""}
+                    <span class="time">${formatTime(t.timestamp)}${sTag}</span>
+                    <span class="transcript-badges">${cBadge}${rBadge}${t.audio_file ? playBtnHtml(t.id) + exportBtnHtml(t.id) : ""}</span>
                 </div>
                 <div class="text">${escapeHtml(t.text)}</div>
             `;
@@ -557,8 +756,11 @@ async function pollStatus() {
         const resp = await fetch("/api/status");
         const data = await resp.json();
         const pip = data.pipeline;
-        const dot = pip.running ? "running" : "disconnected";
-        const label = pip.running ? "Pipeline running" : pip.error ? `Error: ${pip.error}` : "Pipeline idle";
+        const isRunning = pip.running;
+        const dot = isRunning ? "running" : "disconnected";
+        const streamStates = pip.streams || {};
+        const runningCount = Object.values(streamStates).filter(s => s.running).length;
+        const label = isRunning ? `${runningCount} stream${runningCount !== 1 ? "s" : ""} running` : "Pipeline idle";
         document.getElementById("pipeline-status").innerHTML =
             `<span class="status-dot ${dot}"></span>${label}`;
 
@@ -568,11 +770,18 @@ async function pollStatus() {
         eventsActive = data.counts.events_active || 0;
         updateCounts();
 
-        if (pip.chunks_processed !== undefined) {
+        // Aggregate chunk status across streams
+        let totalChunks = 0, totalSilent = 0, lastChunk = null;
+        Object.values(streamStates).forEach(s => {
+            totalChunks += s.chunks_processed || 0;
+            totalSilent += s.silent_chunks || 0;
+            if (s.last_chunk && (!lastChunk || s.last_chunk > lastChunk)) lastChunk = s.last_chunk;
+        });
+        if (totalChunks > 0) {
             updateChunkStatus({
-                chunks_processed: pip.chunks_processed,
-                silent_chunks: pip.silent_chunks,
-                last_chunk: pip.last_chunk,
+                chunks_processed: totalChunks,
+                silent_chunks: totalSilent,
+                last_chunk: lastChunk,
             });
         }
     } catch (e) {
@@ -605,13 +814,15 @@ function createSummaryCard(s) {
     const card = document.createElement("div");
     card.className = `summary-card ${s.activity_level || 'moderate'}`;
     card.id = `summary-${s.id}`;
+    if (s.stream_id) card.dataset.streamId = s.stream_id;
 
     const timeRange = `${formatTime(s.period_start)} – ${formatTime(s.period_end)}`;
     const themes = (s.key_themes || []).map(t => `<span class="summary-theme">${escapeHtml(t)}</span>`).join("");
+    const sTag = streamTagHtml(s.stream_id);
 
     card.innerHTML = `
         <div class="summary-header">
-            <span class="summary-time-range">${timeRange}</span>
+            <span class="summary-time-range">${timeRange}${sTag}</span>
             <span class="activity-badge ${s.activity_level || 'moderate'}">${s.activity_level || 'moderate'}</span>
         </div>
         <div class="summary-text">${escapeHtml(s.summary_text)}</div>
@@ -658,10 +869,10 @@ async function loadSummaries() {
 // --- Map ---
 
 const SEVERITY_COLORS = {
-    critical: { fill: "#ef4444", stroke: "#b91c1c" },
-    high:     { fill: "#f97316", stroke: "#c2410c" },
-    medium:   { fill: "#eab308", stroke: "#a16207" },
-    low:      { fill: "#3b82f6", stroke: "#1d4ed8" },
+    critical: { fill: "#ff3b3b", stroke: "#cc2020" },
+    high:     { fill: "#ff8c22", stroke: "#cc6a10" },
+    medium:   { fill: "#ffb800", stroke: "#cc9300" },
+    low:      { fill: "#4a90e2", stroke: "#2c6cb5" },
 };
 
 async function loadMapApi() {
@@ -699,16 +910,16 @@ async function loadMapApi() {
 }
 
 const MAP_DARK_STYLES = [
-    { elementType: "geometry", stylers: [{ color: "#1a1d27" }] },
-    { elementType: "labels.text.stroke", stylers: [{ color: "#1a1d27" }] },
-    { elementType: "labels.text.fill", stylers: [{ color: "#8b90a0" }] },
-    { featureType: "administrative", elementType: "geometry.stroke", stylers: [{ color: "#2e3345" }] },
-    { featureType: "road", elementType: "geometry", stylers: [{ color: "#242836" }] },
-    { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#2e3345" }] },
-    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#2e3345" }] },
-    { featureType: "water", elementType: "geometry", stylers: [{ color: "#0f1117" }] },
-    { featureType: "poi", elementType: "geometry", stylers: [{ color: "#242836" }] },
-    { featureType: "transit", elementType: "geometry", stylers: [{ color: "#242836" }] },
+    { elementType: "geometry", stylers: [{ color: "#131b2e" }] },
+    { elementType: "labels.text.stroke", stylers: [{ color: "#131b2e" }] },
+    { elementType: "labels.text.fill", stylers: [{ color: "#7a8ba6" }] },
+    { featureType: "administrative", elementType: "geometry.stroke", stylers: [{ color: "#1a2744" }] },
+    { featureType: "road", elementType: "geometry", stylers: [{ color: "#192440" }] },
+    { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#1a2744" }] },
+    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#1c2742" }] },
+    { featureType: "water", elementType: "geometry", stylers: [{ color: "#080d18" }] },
+    { featureType: "poi", elementType: "geometry", stylers: [{ color: "#192440" }] },
+    { featureType: "transit", elementType: "geometry", stylers: [{ color: "#192440" }] },
 ];
 
 async function initMapPanel() {
@@ -740,6 +951,7 @@ async function loadMapEvents() {
     const params = [];
     if (status) params.push(`status=${status}`);
     if (hours) params.push(`hours=${hours}`);
+    if (selectedStreamId) params.push(`stream_id=${selectedStreamId}`);
     if (params.length) url += "?" + params.join("&");
 
     try {
@@ -792,8 +1004,9 @@ function addOrUpdateMapMarker(ev) {
     });
 
     marker.addListener("click", () => {
+        const infoId = `map-info-${ev.id}`;
         const content = `
-            <div class="map-info-window">
+            <div class="map-info-window" id="${infoId}">
                 <div class="info-title">${escapeHtml(ev.title)}</div>
                 <div class="info-badges">
                     <span class="info-badge ${ev.severity}">${ev.severity}</span>
@@ -802,10 +1015,41 @@ function addOrUpdateMapMarker(ev) {
                 <div class="info-meta"><strong>Category:</strong> ${escapeHtml(ev.category)}</div>
                 ${ev.location_text ? `<div class="info-location">&#128205; ${escapeHtml(ev.location_text)}</div>` : ""}
                 <div class="info-meta">${formatTime(ev.created_at)}${ev.updated_at !== ev.created_at ? " – " + formatTime(ev.updated_at) : ""}</div>
+                <div class="info-audio-section"><span class="info-audio-loading">Loading audio...</span></div>
             </div>
         `;
         mapInfoWindow.setContent(content);
         mapInfoWindow.open(map, marker);
+
+        fetch(`/api/events/${ev.id}`)
+            .then(r => r.json())
+            .then(data => {
+                const container = document.getElementById(infoId);
+                if (!container) return;
+                const audioSection = container.querySelector(".info-audio-section");
+                if (!audioSection) return;
+                const alerts = (data.alerts || []).filter(a => a.transcription_id);
+                if (alerts.length === 0) {
+                    audioSection.remove();
+                    return;
+                }
+                audioSection.innerHTML = '<div class="info-audio-label">Audio</div>' +
+                    '<div class="info-audio-list">' +
+                    alerts.map(a => `
+                        <div class="info-audio-item">
+                            <span class="info-audio-summary">${escapeHtml(a.summary).substring(0, 60)}${a.summary.length > 60 ? '...' : ''}</span>
+                            <button class="play-btn info-play-btn" onclick="playAudio(${a.transcription_id}, this)">${PLAY_SVG}Play</button>
+                            <button class="export-btn info-play-btn" onclick="openExportModal(${a.transcription_id})">${VIDEO_SVG}Video</button>
+                        </div>
+                    `).join("") +
+                    '</div>';
+            })
+            .catch(() => {
+                const container = document.getElementById(infoId);
+                if (!container) return;
+                const audioSection = container.querySelector(".info-audio-section");
+                if (audioSection) audioSection.remove();
+            });
     });
 
     mapMarkers[ev.id] = marker;
@@ -851,9 +1095,15 @@ function updateMapFromEvent(eventData) {
 
 async function loadLiveFeed() {
     try {
+        let tUrl = `/api/transcriptions?limit=${FEED_PAGE}&offset=0`;
+        let evUrl = "/api/events?limit=50&offset=0";
+        if (selectedStreamId) {
+            tUrl += `&stream_id=${selectedStreamId}`;
+            evUrl += `&stream_id=${selectedStreamId}`;
+        }
         const [tResp, evResp] = await Promise.all([
-            fetch(`/api/transcriptions?limit=${FEED_PAGE}&offset=0`),
-            fetch("/api/events?limit=50&offset=0"),
+            fetch(tUrl),
+            fetch(evUrl),
         ]);
         const tData = await tResp.json();
         const evData = await evResp.json();
@@ -870,10 +1120,15 @@ async function loadLiveFeed() {
                 const el = document.createElement("div");
                 el.className = "transcript-item";
                 if (t.id) el.id = `t-${t.id}`;
+                if (t.stream_id) el.dataset.streamId = t.stream_id;
+                const cPct = t.confidence != null ? Math.round(t.confidence * 100) : null;
+                const cBadge = cPct != null ? `<span class="confidence-badge ${cPct > 60 ? 'good' : cPct > 30 ? 'warn' : 'poor'}">${cPct}%</span>` : "";
+                const rBadge = t.needs_review ? '<span class="review-badge">Review</span>' : "";
+                const sTag = streamTagHtml(t.stream_id);
                 el.innerHTML = `
                     <div class="item-header">
-                        <span class="time">${formatTime(t.timestamp)}</span>
-                        ${t.audio_file ? playBtnHtml(t.id) : ""}
+                        <span class="time">${formatTime(t.timestamp)}${sTag}</span>
+                        <span class="transcript-badges">${cBadge}${rBadge}${t.audio_file ? playBtnHtml(t.id) + exportBtnHtml(t.id) : ""}</span>
                     </div>
                     <div class="text">${escapeHtml(t.text)}</div>
                 `;
@@ -898,13 +1153,37 @@ async function loadLiveFeed() {
     }
 }
 
+// --- Alert Feedback ---
+
+async function feedbackAlert(alertId, feedbackType, btn) {
+    try {
+        const resp = await fetch(`/api/alerts/${alertId}/feedback`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ feedback_type: feedbackType }),
+        });
+        if (!resp.ok) throw new Error("Failed");
+        const container = document.getElementById(`fb-${alertId}`);
+        if (container) {
+            const label = feedbackType === "correct" ? "Confirmed" : "Marked FP";
+            container.innerHTML = `<span class="feedback-done ${feedbackType}">${label}</span>`;
+        }
+    } catch (e) {
+        console.error("Feedback submission failed:", e);
+    }
+}
+
+
 // --- Init ---
 
 if ("Notification" in window && Notification.permission === "default") {
     Notification.requestPermission();
 }
 
-connectWS();
-loadLiveFeed();
-pollStatus();
-setInterval(pollStatus, 15000);
+// Load streams first, then connect and load feed
+loadStreams().then(() => {
+    connectWS();
+    loadLiveFeed();
+    pollStatus();
+    setInterval(pollStatus, 15000);
+});

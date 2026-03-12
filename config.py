@@ -8,16 +8,20 @@ load_dotenv()
 
 # Keys that get persisted to the database
 _PERSIST_KEYS = (
-    "stream_url", "whisper_model", "analysis_model", "alert_sensitivity",
+    "whisper_model", "analysis_model", "alert_sensitivity",
     "custom_instructions", "chunk_duration_s", "openrouter_api_key",
     "google_maps_api_key", "map_default_lat", "map_default_lng",
     "event_timeout_minutes", "geocode_region", "geocode_max_radius_km",
+    "webhook_url",
+    "vad_threshold", "vad_grace_period_s", "vad_pre_roll_s",
+    "max_chunk_duration_s", "min_chunk_duration_s",
 )
 
 
 @dataclass
 class Config:
-    stream_url: str = field(default_factory=lambda: os.getenv("STREAM_URL", ""))
+    # stream_url removed — streams are managed in the DB; this seed is only for initial setup
+    _seed_stream_url: str = field(default_factory=lambda: os.getenv("STREAM_URL", ""))
     openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
     whisper_model: str = field(default_factory=lambda: os.getenv("WHISPER_MODEL", "base"))
     analysis_model: str = field(default_factory=lambda: os.getenv("ANALYSIS_MODEL", "google/gemini-2.0-flash-001"))
@@ -34,10 +38,15 @@ class Config:
     event_timeout_minutes: int = field(default_factory=lambda: int(os.getenv("EVENT_TIMEOUT_MINUTES", "45")))
     geocode_region: str = field(default_factory=lambda: os.getenv("GEOCODE_REGION", "Texarkana, TX"))
     geocode_max_radius_km: float = field(default_factory=lambda: float(os.getenv("GEOCODE_MAX_RADIUS_KM", "50")))
+    webhook_url: str = field(default_factory=lambda: os.getenv("WEBHOOK_URL", ""))
+    vad_threshold: float = field(default_factory=lambda: float(os.getenv("VAD_THRESHOLD", "0.01")))
+    vad_grace_period_s: float = field(default_factory=lambda: float(os.getenv("VAD_GRACE_PERIOD_S", "1.5")))
+    vad_pre_roll_s: float = field(default_factory=lambda: float(os.getenv("VAD_PRE_ROLL_S", "1.0")))
+    max_chunk_duration_s: float = field(default_factory=lambda: float(os.getenv("MAX_CHUNK_DURATION_S", "60")))
+    min_chunk_duration_s: float = field(default_factory=lambda: float(os.getenv("MIN_CHUNK_DURATION_S", "1.5")))
 
     def to_dict(self) -> dict:
         return {
-            "stream_url": self.stream_url,
             "whisper_model": self.whisper_model,
             "analysis_model": self.analysis_model,
             "alert_sensitivity": self.alert_sensitivity,
@@ -48,10 +57,16 @@ class Config:
             "event_timeout_minutes": self.event_timeout_minutes,
             "geocode_region": self.geocode_region,
             "geocode_max_radius_km": self.geocode_max_radius_km,
+            "webhook_url": self.webhook_url,
+            "vad_threshold": self.vad_threshold,
+            "vad_grace_period_s": self.vad_grace_period_s,
+            "vad_pre_roll_s": self.vad_pre_roll_s,
+            "max_chunk_duration_s": self.max_chunk_duration_s,
+            "min_chunk_duration_s": self.min_chunk_duration_s,
         }
 
     def update(self, data: dict) -> None:
-        for key in ("stream_url", "whisper_model", "analysis_model", "alert_sensitivity", "custom_instructions"):
+        for key in ("whisper_model", "analysis_model", "alert_sensitivity", "custom_instructions"):
             if key in data:
                 setattr(self, key, data[key])
         if "openrouter_api_key" in data and data["openrouter_api_key"]:
@@ -70,6 +85,12 @@ class Config:
             self.geocode_region = data["geocode_region"]
         if "geocode_max_radius_km" in data:
             self.geocode_max_radius_km = float(data["geocode_max_radius_km"])
+        if "webhook_url" in data:
+            self.webhook_url = data["webhook_url"]
+        for fkey in ("vad_threshold", "vad_grace_period_s", "vad_pre_roll_s",
+                      "max_chunk_duration_s", "min_chunk_duration_s"):
+            if fkey in data:
+                setattr(self, fkey, float(data[fkey]))
         # Persist to database
         self._save()
 
@@ -79,10 +100,10 @@ class Config:
         saved = load_settings(self.db_path)
         if not saved:
             return
-        _str_keys = ("stream_url", "whisper_model", "analysis_model",
+        _str_keys = ("whisper_model", "analysis_model",
                       "alert_sensitivity", "custom_instructions",
                       "openrouter_api_key", "google_maps_api_key",
-                      "geocode_region")
+                      "geocode_region", "webhook_url")
         for key in _str_keys:
             if key in saved and saved[key]:
                 setattr(self, key, saved[key])
@@ -96,6 +117,10 @@ class Config:
             self.event_timeout_minutes = int(saved["event_timeout_minutes"])
         if "geocode_max_radius_km" in saved:
             self.geocode_max_radius_km = float(saved["geocode_max_radius_km"])
+        for fkey in ("vad_threshold", "vad_grace_period_s", "vad_pre_roll_s",
+                      "max_chunk_duration_s", "min_chunk_duration_s"):
+            if fkey in saved:
+                setattr(self, fkey, float(saved[fkey]))
 
     def _save(self) -> None:
         """Persist current settings to the database."""

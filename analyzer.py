@@ -50,6 +50,53 @@ def get_base_prompt() -> str:
     return SYSTEM_PROMPT
 
 
+async def _build_feedback_context(db_path: str) -> str:
+    """Build feedback context string to inject into the LLM system prompt.
+
+    Includes false positive patterns, category corrections, and FP rate warnings.
+    """
+    from database import get_recent_false_positives, get_correction_patterns, get_feedback_stats
+
+    parts = []
+
+    try:
+        # False positive patterns
+        fps = await get_recent_false_positives(db_path, limit=5)
+        if fps:
+            fp_lines = []
+            for fp in fps:
+                fp_lines.append(f"- [{fp.get('category', '?')}] \"{fp.get('summary', '')}\"")
+            parts.append(
+                "FEEDBACK FROM OPERATORS — These recent alerts were marked as FALSE POSITIVES. "
+                "Be more cautious about similar patterns:\n" + "\n".join(fp_lines)
+            )
+
+        # Category correction patterns
+        corrections = await get_correction_patterns(db_path, limit=5)
+        if corrections:
+            corr_lines = []
+            for c in corrections:
+                corr_lines.append(
+                    f"- '{c['original_category']}' was corrected to '{c['corrected_category']}' ({c['count']} times)"
+                )
+            parts.append(
+                "CATEGORY CORRECTION PATTERNS — Operators frequently corrected these category assignments:\n"
+                + "\n".join(corr_lines)
+            )
+
+        # FP rate warning
+        stats = await get_feedback_stats(db_path)
+        if stats["total_feedback"] >= 5 and stats["false_positive_rate"] > 30:
+            parts.append(
+                f"WARNING: Recent false positive rate is {stats['false_positive_rate']:.0f}%. "
+                "Be MORE SELECTIVE about what you flag as an alert. Only flag events you are confident about."
+            )
+    except Exception:
+        logger.debug("Failed to build feedback context", exc_info=True)
+
+    return "\n\n".join(parts)
+
+
 async def analyze_transcript(
     transcript: str,
     api_key: str,
@@ -58,6 +105,7 @@ async def analyze_transcript(
     recent_alerts: list[str] | None = None,
     custom_instructions: str = "",
     active_events: list[dict] | None = None,
+    db_path: str | None = None,
 ) -> dict | None:
     """Analyze transcript text for breaking news. Returns alert dict or None."""
     if not transcript.strip() or not api_key:
@@ -89,6 +137,11 @@ async def analyze_transcript(
 
     if custom_instructions.strip():
         system_content += "\n\nAdditional instructions from the operator:\n" + custom_instructions.strip()
+
+    # Inject feedback context from learning loop
+    feedback_ctx = await _build_feedback_context(db_path) if db_path else ""
+    if feedback_ctx:
+        system_content += "\n\n" + feedback_ctx
 
     client = AsyncOpenAI(
         base_url="https://openrouter.ai/api/v1",

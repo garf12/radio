@@ -4,4 +4,6 @@ __pycache__/
 venv/
 *.pyc
 audio/
-=0.4.0
+.DS_Store
+scanner.log
+models/

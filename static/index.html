@@ -3,12 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TXKtoday - Scanner Monitor</title>
+    <title>TXKtoday — Scanner Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
     <header>
-        <h1>TXKtoday - Scanner Monitor</h1>
+        <h1><span class="brand-accent">TXK</span>today — Scanner Monitor</h1>
+        <div class="stream-selector">
+            <select id="stream-select" onchange="onStreamChange()">
+                <option value="">All Streams</option>
+            </select>
+        </div>
         <div class="audio-meter">
             <button class="live-listen-btn" id="live-listen-btn" onclick="toggleLiveAudio()" title="Listen live">
                 <svg viewBox="0 0 16 16" class="live-listen-icon" id="live-listen-icon"><polygon points="4,2 14,8 4,14"/></svg>
@@ -18,12 +26,13 @@
                 <div class="audio-meter-peak" id="audio-meter-peak"></div>
             </div>
             <span class="audio-meter-db" id="audio-meter-db">--dB</span>
+            <span class="vad-indicator" id="vad-indicator">STANDBY</span>
         </div>
         <div class="status-bar">
             <span id="ws-status"><span class="status-dot disconnected"></span>Disconnected</span>
             <span id="pipeline-status"><span class="status-dot disconnected"></span>Pipeline idle</span>
             <span id="counts"></span>
-            <span id="chunk-status" style="color:var(--text-dim)"></span>
+            <span id="chunk-status"></span>
         </div>
     </header>
 
@@ -31,8 +40,9 @@
         <div class="tab active" data-tab="live">Live</div>
         <div class="tab" data-tab="events">Events</div>
         <div class="tab" data-tab="summaries">Summaries</div>
+        <a href="/review.html" class="tab settings-tab-link">Review</a>
         <div class="tab" data-tab="map">Map</div>
-        <div class="tab" data-tab="config">Settings</div>
+        <a href="/settings.html" class="tab settings-tab-link">Settings</a>
     </div>
 
     <div class="main">
@@ -112,70 +122,31 @@
             <div id="map-container"></div>
         </div>
 
-        <!-- Config Panel -->
-        <div class="panel config-panel" id="panel-config">
-            <h2 style="font-size:14px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:20px;">Settings</h2>
+    </div>
+
+    <!-- Export Video Modal -->
+    <div class="modal-overlay" id="export-modal" style="display:none" onclick="if(event.target===this)closeExportModal()">
+        <div class="modal-content">
+            <h3>Export Audio as Video</h3>
             <div class="form-group">
-                <label>Stream URL</label>
-                <input type="url" id="cfg-stream-url" placeholder="https://broadcastify.cdnstream1.com/...">
-            </div>
-            <div class="form-group">
-                <label>OpenRouter API Key</label>
-                <input type="password" id="cfg-api-key" placeholder="sk-or-v1-...">
-            </div>
-            <div class="form-group">
-                <label>Analysis Model</label>
-                <select id="cfg-model">
-                    <option value="">Loading models...</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Whisper Model</label>
-                <select id="cfg-whisper">
-                    <option value="tiny">tiny (fastest)</option>
-                    <option value="base" selected>base</option>
-                    <option value="small">small (better accuracy)</option>
-                    <option value="medium">medium (high accuracy)</option>
-                    <option value="large-v3">large-v3 (best accuracy)</option>
-                    <option value="turbo">turbo (fast + accurate)</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Alert Sensitivity</label>
-                <select id="cfg-sensitivity">
-                    <option value="low">Low - Critical events only</option>
-                    <option value="medium" selected>Medium - Significant events</option>
-                    <option value="high">High - Most notable events</option>
-                </select>
-            </div>
-            <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
-            <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:12px;">AI Analysis Prompt</h3>
-            <div class="form-group">
-                <label>Base System Prompt <span style="color:var(--text-dim);font-weight:normal">(read-only)</span></label>
-                <textarea id="cfg-system-prompt" readonly rows="10" style="resize:vertical;opacity:0.7;cursor:default"></textarea>
-            </div>
-            <div class="form-group">
-                <label>Custom Instructions <span style="color:var(--text-dim);font-weight:normal">(appended to prompt)</span></label>
-                <textarea id="cfg-custom-instructions" rows="5" style="resize:vertical" placeholder="e.g. This scanner monitors Springfield County PD. Alert on any mentions of Main Street or the downtown area. Ignore routine traffic stops on Highway 65."></textarea>
-            </div>
-            <hr style="border:none;border-top:1px solid var(--border);margin:24px 0;">
-            <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);margin-bottom:12px;">Map Settings</h3>
-            <div class="form-group">
-                <label>Google Maps API Key</label>
-                <input type="password" id="cfg-maps-api-key" placeholder="AIza...">
-            </div>
-            <div class="form-row">
-                <div class="form-group" style="flex:1">
-                    <label>Default Map Center Latitude</label>
-                    <input type="number" id="cfg-map-lat" step="0.0001" placeholder="33.4418">
-                </div>
-                <div class="form-group" style="flex:1">
-                    <label>Default Map Center Longitude</label>
-                    <input type="number" id="cfg-map-lng" step="0.0001" placeholder="-94.0477">
+                <label>Background Photo <span class="label-hint">(optional)</span></label>
+                <div class="file-picker" id="bg-picker" onclick="document.getElementById('export-bg').click()">
+                    <span class="file-picker-label" id="bg-picker-label">Click to select image...</span>
+                    <input type="file" id="export-bg" accept="image/*" style="display:none" onchange="onBgFileChange(this)">
                 </div>
             </div>
-            <button class="btn" onclick="saveConfig()">Save Settings</button>
-            <span class="save-msg" id="save-msg">Settings saved!</span>
+            <div class="form-group">
+                <label>Overlay Text <span class="label-hint">(optional)</span></label>
+                <textarea id="export-text" rows="3" placeholder="Add text to display over the video..."></textarea>
+            </div>
+            <div class="export-status" id="export-status" style="display:none">
+                <span class="export-spinner" id="export-spinner" style="display:none"></span>
+                <span id="export-status-text"></span>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn" id="export-generate-btn" onclick="generateVideo()">Generate Video</button>
+                <button class="btn btn-cancel" onclick="closeExportModal()">Cancel</button>
+            </div>
         </div>
     </div>
 

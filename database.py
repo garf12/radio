@@ -99,24 +99,243 @@ def init_db(db_path: str) -> None:
         conn.execute("ALTER TABLE summaries ADD COLUMN summary_type TEXT DEFAULT '10min'")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # Streams table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS streams (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            color TEXT DEFAULT '#00e89d',
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    # Migration: add stream_id column to relevant tables
+    for tbl in ("transcriptions", "alerts", "events", "summaries"):
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN stream_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{tbl}_stream_id ON {tbl}(stream_id)")
+    # Migration: add confidence/review columns to transcriptions
+    for col_sql in [
+        "ALTER TABLE transcriptions ADD COLUMN confidence REAL",
+        "ALTER TABLE transcriptions ADD COLUMN flags TEXT",
+        "ALTER TABLE transcriptions ADD COLUMN segment_details TEXT",
+        "ALTER TABLE transcriptions ADD COLUMN needs_review INTEGER DEFAULT 0",
+        "ALTER TABLE transcriptions ADD COLUMN review_status TEXT",
+        "ALTER TABLE transcriptions ADD COLUMN corrected_text TEXT",
+        "ALTER TABLE transcriptions ADD COLUMN reviewed_at TEXT",
+    ]:
+        try:
+            conn.execute(col_sql)
+        except sqlite3.OperationalError:
+            pass
+    # Learning loop tables
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS alert_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER NOT NULL,
+            feedback_type TEXT NOT NULL,
+            corrected_summary TEXT,
+            corrected_severity TEXT,
+            corrected_category TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (alert_id) REFERENCES alerts(id)
+        );
+        CREATE TABLE IF NOT EXISTS regional_dictionary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            term TEXT NOT NULL,
+            replacement TEXT NOT NULL,
+            category TEXT DEFAULT 'general',
+            frequency INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_regional_dictionary_term
+            ON regional_dictionary(term);
+        CREATE TABLE IF NOT EXISTS feedback_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_date TEXT UNIQUE NOT NULL,
+            total_alerts INTEGER DEFAULT 0,
+            true_positives INTEGER DEFAULT 0,
+            false_positives INTEGER DEFAULT 0,
+            corrections INTEGER DEFAULT 0,
+            avg_confidence REAL,
+            review_queue_size INTEGER DEFAULT 0
+        );
+    """)
     conn.close()
 
 
-def _insert_transcription(db_path: str, text: str, duration_s: float, audio_file: str | None = None) -> dict:
+def _seed_default_stream(db_path: str, stream_url: str) -> None:
+    """If streams table is empty, seed a default stream and backfill.
+
+    Checks the env-var seed URL first, then falls back to the legacy
+    ``stream_url`` value stored in the ``settings`` table (from before
+    multi-stream support was added).
+    """
+    conn = _get_conn(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM streams").fetchone()[0]
+    if count > 0:
+        conn.close()
+        return
+    # Resolve URL: prefer env-var seed, fall back to legacy settings table
+    url = stream_url
+    if not url:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'stream_url'"
+        ).fetchone()
+        if row:
+            url = row[0]
+    if not url:
+        conn.close()
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO streams (id, name, url, enabled, color, sort_order, created_at, updated_at) "
+        "VALUES (?, ?, ?, 1, '#00e89d', 0, ?, ?)",
+        ("default", "Default Scanner", url, now, now),
+    )
+    for tbl in ("transcriptions", "alerts", "events", "summaries"):
+        conn.execute(f"UPDATE {tbl} SET stream_id = 'default' WHERE stream_id IS NULL")
+    conn.commit()
+    conn.close()
+
+
+async def seed_default_stream(db_path: str, stream_url: str) -> None:
+    return await asyncio.to_thread(_seed_default_stream, db_path, stream_url)
+
+
+# --- Stream CRUD ---
+
+
+def _get_streams(db_path: str, enabled_only: bool = False) -> list[dict]:
+    conn = _get_conn(db_path)
+    if enabled_only:
+        rows = conn.execute("SELECT * FROM streams WHERE enabled = 1 ORDER BY sort_order, created_at").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM streams ORDER BY sort_order, created_at").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+async def get_streams(db_path: str, enabled_only: bool = False) -> list[dict]:
+    return await asyncio.to_thread(_get_streams, db_path, enabled_only)
+
+
+def _get_stream(db_path: str, stream_id: str) -> dict | None:
+    conn = _get_conn(db_path)
+    row = conn.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+async def get_stream(db_path: str, stream_id: str) -> dict | None:
+    return await asyncio.to_thread(_get_stream, db_path, stream_id)
+
+
+def _create_stream(db_path: str, stream_id: str, name: str, url: str, color: str = "#00e89d", enabled: bool = True) -> dict:
+    conn = _get_conn(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    sort_order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM streams").fetchone()[0]
+    conn.execute(
+        "INSERT INTO streams (id, name, url, enabled, color, sort_order, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (stream_id, name, url, 1 if enabled else 0, color, sort_order, now, now),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+async def create_stream(db_path: str, stream_id: str, name: str, url: str, color: str = "#00e89d", enabled: bool = True) -> dict:
+    return await asyncio.to_thread(_create_stream, db_path, stream_id, name, url, color, enabled)
+
+
+def _update_stream(db_path: str, stream_id: str, **kwargs) -> dict | None:
+    conn = _get_conn(db_path)
+    row = conn.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    allowed = {"name", "url", "enabled", "color", "sort_order"}
+    sets = []
+    params = []
+    for k, v in kwargs.items():
+        if k in allowed:
+            sets.append(f"{k} = ?")
+            params.append(v)
+    if not sets:
+        conn.close()
+        return dict(row)
+    now = datetime.now(timezone.utc).isoformat()
+    sets.append("updated_at = ?")
+    params.append(now)
+    params.append(stream_id)
+    conn.execute(f"UPDATE streams SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+    row = conn.execute("SELECT * FROM streams WHERE id = ?", (stream_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+async def update_stream(db_path: str, stream_id: str, **kwargs) -> dict | None:
+    return await asyncio.to_thread(_update_stream, db_path, stream_id, **kwargs)
+
+
+def _delete_stream(db_path: str, stream_id: str) -> bool:
+    conn = _get_conn(db_path)
+    cur = conn.execute("DELETE FROM streams WHERE id = ?", (stream_id,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+async def delete_stream(db_path: str, stream_id: str) -> bool:
+    return await asyncio.to_thread(_delete_stream, db_path, stream_id)
+
+
+def _insert_transcription(
+    db_path: str, text: str, duration_s: float, audio_file: str | None = None,
+    confidence: float | None = None, flags: list | None = None, segment_details: list | None = None,
+    stream_id: str | None = None,
+) -> dict:
     conn = _get_conn(db_path)
     ts = datetime.now(timezone.utc).isoformat()
+    flags_json = json.dumps(flags) if flags else None
+    segments_json = json.dumps(segment_details) if segment_details else None
+    needs_review = 1 if flags else 0
+    review_status = "pending" if flags else None
     cur = conn.execute(
-        "INSERT INTO transcriptions (timestamp, text, duration_s, audio_file) VALUES (?, ?, ?, ?)",
-        (ts, text, duration_s, audio_file),
+        "INSERT INTO transcriptions (timestamp, text, duration_s, audio_file, confidence, flags, segment_details, needs_review, review_status, stream_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (ts, text, duration_s, audio_file, confidence, flags_json, segments_json, needs_review, review_status, stream_id),
     )
     row_id = cur.lastrowid
     conn.commit()
     conn.close()
-    return {"id": row_id, "timestamp": ts, "text": text, "duration_s": duration_s, "audio_file": audio_file}
+    return {
+        "id": row_id, "timestamp": ts, "text": text, "duration_s": duration_s,
+        "audio_file": audio_file, "confidence": confidence,
+        "flags": flags or [], "needs_review": needs_review,
+        "stream_id": stream_id,
+    }
 
 
-async def insert_transcription(db_path: str, text: str, duration_s: float, audio_file: str | None = None) -> dict:
-    return await asyncio.to_thread(_insert_transcription, db_path, text, duration_s, audio_file)
+async def insert_transcription(
+    db_path: str, text: str, duration_s: float, audio_file: str | None = None,
+    confidence: float | None = None, flags: list | None = None, segment_details: list | None = None,
+    stream_id: str | None = None,
+) -> dict:
+    return await asyncio.to_thread(
+        _insert_transcription, db_path, text, duration_s, audio_file, confidence, flags, segment_details, stream_id,
+    )
 
 
 def _insert_alert(
@@ -127,13 +346,14 @@ def _insert_alert(
     category: str,
     raw_context: str,
     model_used: str,
+    stream_id: str | None = None,
 ) -> dict:
     conn = _get_conn(db_path)
     ts = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
-        "INSERT INTO alerts (transcription_id, timestamp, summary, severity, category, raw_context, model_used) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (transcription_id, ts, summary, severity, category, raw_context, model_used),
+        "INSERT INTO alerts (transcription_id, timestamp, summary, severity, category, raw_context, model_used, stream_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (transcription_id, ts, summary, severity, category, raw_context, model_used, stream_id),
     )
     row_id = cur.lastrowid
     conn.commit()
@@ -146,6 +366,7 @@ def _insert_alert(
         "severity": severity,
         "category": category,
         "model_used": model_used,
+        "stream_id": stream_id,
     }
 
 
@@ -157,24 +378,31 @@ async def insert_alert(
     category: str,
     raw_context: str,
     model_used: str,
+    stream_id: str | None = None,
 ) -> dict:
     return await asyncio.to_thread(
-        _insert_alert, db_path, transcription_id, summary, severity, category, raw_context, model_used
+        _insert_alert, db_path, transcription_id, summary, severity, category, raw_context, model_used, stream_id,
     )
 
 
-def _get_transcriptions(db_path: str, limit: int = 50, offset: int = 0) -> list[dict]:
+def _get_transcriptions(db_path: str, limit: int = 50, offset: int = 0, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
-    rows = conn.execute(
-        "SELECT * FROM transcriptions ORDER BY id DESC LIMIT ? OFFSET ?",
-        (limit, offset),
-    ).fetchall()
+    if stream_id:
+        rows = conn.execute(
+            "SELECT * FROM transcriptions WHERE stream_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (stream_id, limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM transcriptions ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-async def get_transcriptions(db_path: str, limit: int = 50, offset: int = 0) -> list[dict]:
-    return await asyncio.to_thread(_get_transcriptions, db_path, limit, offset)
+async def get_transcriptions(db_path: str, limit: int = 50, offset: int = 0, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_transcriptions, db_path, limit, offset, stream_id)
 
 
 def _get_transcription(db_path: str, transcription_id: int) -> dict | None:
@@ -190,30 +418,37 @@ async def get_transcription(db_path: str, transcription_id: int) -> dict | None:
     return await asyncio.to_thread(_get_transcription, db_path, transcription_id)
 
 
-def _get_alerts(db_path: str, limit: int = 50, offset: int = 0) -> list[dict]:
+def _get_alerts(db_path: str, limit: int = 50, offset: int = 0, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
-    rows = conn.execute(
-        "SELECT * FROM alerts ORDER BY id DESC LIMIT ? OFFSET ?",
-        (limit, offset),
-    ).fetchall()
+    if stream_id:
+        rows = conn.execute(
+            "SELECT * FROM alerts WHERE stream_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (stream_id, limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM alerts ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-async def get_alerts(db_path: str, limit: int = 50, offset: int = 0) -> list[dict]:
-    return await asyncio.to_thread(_get_alerts, db_path, limit, offset)
+async def get_alerts(db_path: str, limit: int = 50, offset: int = 0, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_alerts, db_path, limit, offset, stream_id)
 
 
 def _insert_event(
     db_path: str, title: str, category: str, severity: str,
     location_text: str | None = None, latitude: float | None = None, longitude: float | None = None,
+    stream_id: str | None = None,
 ) -> dict:
     conn = _get_conn(db_path)
     now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
-        "INSERT INTO events (status, category, severity, title, created_at, updated_at, location_text, latitude, longitude) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("active", category, severity, title, now, now, location_text, latitude, longitude),
+        "INSERT INTO events (status, category, severity, title, created_at, updated_at, location_text, latitude, longitude, stream_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("active", category, severity, title, now, now, location_text, latitude, longitude, stream_id),
     )
     row_id = cur.lastrowid
     conn.commit()
@@ -222,14 +457,16 @@ def _insert_event(
         "id": row_id, "status": "active", "category": category, "severity": severity,
         "title": title, "created_at": now, "updated_at": now,
         "location_text": location_text, "latitude": latitude, "longitude": longitude,
+        "stream_id": stream_id,
     }
 
 
 async def insert_event(
     db_path: str, title: str, category: str, severity: str,
     location_text: str | None = None, latitude: float | None = None, longitude: float | None = None,
+    stream_id: str | None = None,
 ) -> dict:
-    return await asyncio.to_thread(_insert_event, db_path, title, category, severity, location_text, latitude, longitude)
+    return await asyncio.to_thread(_insert_event, db_path, title, category, severity, location_text, latitude, longitude, stream_id)
 
 
 _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -288,29 +525,44 @@ async def link_alert_to_event(db_path: str, alert_id: int, event_id: int) -> Non
     return await asyncio.to_thread(_link_alert_to_event, db_path, alert_id, event_id)
 
 
-def _get_active_events(db_path: str) -> list[dict]:
+def _get_active_events(db_path: str, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
-    rows = conn.execute(
-        "SELECT * FROM events WHERE status = 'active' ORDER BY updated_at DESC"
-    ).fetchall()
+    if stream_id:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE status = 'active' AND stream_id = ? ORDER BY updated_at DESC",
+            (stream_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE status = 'active' ORDER BY updated_at DESC"
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-async def get_active_events(db_path: str) -> list[dict]:
-    return await asyncio.to_thread(_get_active_events, db_path)
+async def get_active_events(db_path: str, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_active_events, db_path, stream_id)
 
 
-def _get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict]:
+def _get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | None = None, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
-    where = ""
+    conditions: list[str] = []
     params: list = []
     if status:
-        where = "WHERE e.status = ? "
+        conditions.append("e.status = ?")
         params.append(status)
+    if stream_id:
+        conditions.append("e.stream_id = ?")
+        params.append(stream_id)
+    where = ("WHERE " + " AND ".join(conditions) + " ") if conditions else ""
     params.extend([limit, offset])
     rows = conn.execute(
-        "SELECT e.*, COUNT(a.id) AS alert_count FROM events e "
+        "SELECT e.*, COUNT(a.id) AS alert_count, "
+        "(SELECT a2.transcription_id FROM alerts a2 "
+        "JOIN transcriptions t ON t.id = a2.transcription_id "
+        "WHERE a2.event_id = e.id AND t.audio_file IS NOT NULL "
+        "ORDER BY a2.timestamp DESC LIMIT 1) AS audio_transcription_id "
+        "FROM events e "
         "LEFT JOIN alerts a ON a.event_id = e.id "
         f"{where}GROUP BY e.id ORDER BY e.updated_at DESC LIMIT ? OFFSET ?",
         params,
@@ -319,8 +571,8 @@ def _get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | No
     return [dict(r) for r in rows]
 
 
-async def get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict]:
-    return await asyncio.to_thread(_get_events, db_path, limit, offset, status)
+async def get_events(db_path: str, limit: int = 50, offset: int = 0, status: str | None = None, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_events, db_path, limit, offset, status, stream_id)
 
 
 def _get_event_with_alerts(db_path: str, event_id: int) -> dict | None:
@@ -331,7 +583,9 @@ def _get_event_with_alerts(db_path: str, event_id: int) -> dict | None:
         return None
     event = dict(row)
     alerts = conn.execute(
-        "SELECT * FROM alerts WHERE event_id = ? ORDER BY timestamp ASC",
+        "SELECT a.*, t.audio_file FROM alerts a "
+        "LEFT JOIN transcriptions t ON t.id = a.transcription_id "
+        "WHERE a.event_id = ? ORDER BY a.timestamp ASC",
         (event_id,),
     ).fetchall()
     conn.close()
@@ -399,7 +653,7 @@ def _word_overlap_ratio(a: str, b: str) -> float:
     return len(words_a & words_b) / len(words_a | words_b)
 
 
-def _find_matching_event(db_path: str, category: str, location_text: str, alert_summary: str = "") -> dict | None:
+def _find_matching_event(db_path: str, category: str, location_text: str, alert_summary: str = "", stream_id: str | None = None) -> dict | None:
     """Find an active event matching by category + location or title similarity.
 
     Matching strategy (checked in order):
@@ -409,10 +663,16 @@ def _find_matching_event(db_path: str, category: str, location_text: str, alert_
     """
     conn = _get_conn(db_path)
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
-    rows = conn.execute(
-        "SELECT * FROM events WHERE status = 'active' AND updated_at >= ? ORDER BY updated_at DESC",
-        (cutoff,),
-    ).fetchall()
+    if stream_id:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE status = 'active' AND updated_at >= ? AND stream_id = ? ORDER BY updated_at DESC",
+            (cutoff, stream_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE status = 'active' AND updated_at >= ? ORDER BY updated_at DESC",
+            (cutoff,),
+        ).fetchall()
     conn.close()
 
     if not rows:
@@ -460,14 +720,14 @@ def _find_matching_event(db_path: str, category: str, location_text: str, alert_
     return None
 
 
-async def find_matching_event(db_path: str, category: str, location_text: str, alert_summary: str = "") -> dict | None:
-    return await asyncio.to_thread(_find_matching_event, db_path, category, location_text, alert_summary)
+async def find_matching_event(db_path: str, category: str, location_text: str, alert_summary: str = "", stream_id: str | None = None) -> dict | None:
+    return await asyncio.to_thread(_find_matching_event, db_path, category, location_text, alert_summary, stream_id)
 
 
 # --- Geocode cache & map queries ---
 
 
-def _get_events_with_location(db_path: str, limit: int = 200, status: str | None = None, since: str | None = None) -> list[dict]:
+def _get_events_with_location(db_path: str, limit: int = 200, status: str | None = None, since: str | None = None, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
     conditions = ["latitude IS NOT NULL", "longitude IS NOT NULL"]
     params: list = []
@@ -477,6 +737,9 @@ def _get_events_with_location(db_path: str, limit: int = 200, status: str | None
     if since:
         conditions.append("updated_at >= ?")
         params.append(since)
+    if stream_id:
+        conditions.append("stream_id = ?")
+        params.append(stream_id)
     where = " AND ".join(conditions)
     params.append(limit)
     rows = conn.execute(
@@ -487,8 +750,8 @@ def _get_events_with_location(db_path: str, limit: int = 200, status: str | None
     return [dict(r) for r in rows]
 
 
-async def get_events_with_location(db_path: str, limit: int = 200, status: str | None = None, since: str | None = None) -> list[dict]:
-    return await asyncio.to_thread(_get_events_with_location, db_path, limit, status, since)
+async def get_events_with_location(db_path: str, limit: int = 200, status: str | None = None, since: str | None = None, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_events_with_location, db_path, limit, status, since, stream_id)
 
 
 def _get_cached_geocode(db_path: str, address_key: str) -> tuple[float, float] | None:
@@ -546,19 +809,25 @@ def load_settings(db_path: str) -> dict:
 # --- Summaries ---
 
 
-def _get_recent_transcriptions(db_path: str, minutes: int = 10) -> list[dict]:
+def _get_recent_transcriptions(db_path: str, minutes: int = 10, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
-    rows = conn.execute(
-        "SELECT * FROM transcriptions WHERE timestamp >= ? ORDER BY timestamp ASC",
-        (cutoff,),
-    ).fetchall()
+    if stream_id:
+        rows = conn.execute(
+            "SELECT * FROM transcriptions WHERE timestamp >= ? AND stream_id = ? ORDER BY timestamp ASC",
+            (cutoff, stream_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM transcriptions WHERE timestamp >= ? ORDER BY timestamp ASC",
+            (cutoff,),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-async def get_recent_transcriptions(db_path: str, minutes: int = 10) -> list[dict]:
-    return await asyncio.to_thread(_get_recent_transcriptions, db_path, minutes)
+async def get_recent_transcriptions(db_path: str, minutes: int = 10, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_recent_transcriptions, db_path, minutes, stream_id)
 
 
 def _insert_summary(
@@ -572,6 +841,7 @@ def _insert_summary(
     activity_level: str,
     model_used: str | None,
     summary_type: str = "10min",
+    stream_id: str | None = None,
 ) -> dict:
     conn = _get_conn(db_path)
     ts = datetime.now(timezone.utc).isoformat()
@@ -579,9 +849,9 @@ def _insert_summary(
     themes_json = json.dumps(key_themes) if key_themes else None
     cur = conn.execute(
         "INSERT INTO summaries (timestamp, summary_text, period_start, period_end, transcription_count, "
-        "event_references, key_themes, activity_level, model_used, summary_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "event_references, key_themes, activity_level, model_used, summary_type, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ts, summary_text, period_start, period_end, transcription_count,
-         event_refs_json, themes_json, activity_level, model_used, summary_type),
+         event_refs_json, themes_json, activity_level, model_used, summary_type, stream_id),
     )
     row_id = cur.lastrowid
     conn.commit()
@@ -598,6 +868,7 @@ def _insert_summary(
         "activity_level": activity_level,
         "model_used": model_used,
         "summary_type": summary_type,
+        "stream_id": stream_id,
     }
 
 
@@ -612,27 +883,32 @@ async def insert_summary(
     activity_level: str,
     model_used: str | None,
     summary_type: str = "10min",
+    stream_id: str | None = None,
 ) -> dict:
     return await asyncio.to_thread(
         _insert_summary, db_path, summary_text, period_start, period_end,
         transcription_count, event_references, key_themes, activity_level, model_used,
-        summary_type,
+        summary_type, stream_id,
     )
 
 
-def _get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
+def _get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0, stream_id: str | None = None) -> list[dict]:
     conn = _get_conn(db_path)
+    conditions: list[str] = []
+    params: list = []
     if hours is not None:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        rows = conn.execute(
-            "SELECT * FROM summaries WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-            (cutoff, limit, offset),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM summaries ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
+        conditions.append("timestamp >= ?")
+        params.append(cutoff)
+    if stream_id:
+        conditions.append("stream_id = ?")
+        params.append(stream_id)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.extend([limit, offset])
+    rows = conn.execute(
+        f"SELECT * FROM summaries{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        params,
+    ).fetchall()
     conn.close()
     results = []
     for r in rows:
@@ -650,8 +926,8 @@ def _get_summaries(db_path: str, hours: float | None = None, limit: int = 100, o
     return results
 
 
-async def get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
-    return await asyncio.to_thread(_get_summaries, db_path, hours, limit, offset)
+async def get_summaries(db_path: str, hours: float | None = None, limit: int = 100, offset: int = 0, stream_id: str | None = None) -> list[dict]:
+    return await asyncio.to_thread(_get_summaries, db_path, hours, limit, offset, stream_id)
 
 
 def _parse_summary_json(d: dict) -> dict:
@@ -684,3 +960,316 @@ def _get_latest_summaries(db_path: str) -> dict:
 
 async def get_latest_summaries(db_path: str) -> dict:
     return await asyncio.to_thread(_get_latest_summaries, db_path)
+
+
+# --- Review Queue & Feedback ---
+
+
+def _get_review_queue(db_path: str, review_type: str = "all", limit: int = 50, offset: int = 0) -> list[dict]:
+    conn = _get_conn(db_path)
+    items = []
+    if review_type in ("all", "transcriptions"):
+        rows = conn.execute(
+            "SELECT *, 'transcription' as item_type FROM transcriptions "
+            "WHERE needs_review = 1 ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        for r in rows:
+            d = dict(r)
+            try:
+                d["flags"] = json.loads(d["flags"]) if d.get("flags") else []
+            except (json.JSONDecodeError, TypeError):
+                d["flags"] = []
+            items.append(d)
+    if review_type in ("all", "alerts"):
+        rows = conn.execute(
+            "SELECT a.*, 'alert' as item_type FROM alerts a "
+            "LEFT JOIN alert_feedback f ON f.alert_id = a.id "
+            "WHERE f.id IS NULL ORDER BY a.timestamp DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        items.extend(dict(r) for r in rows)
+    items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return items[:limit]
+
+
+async def get_review_queue(db_path: str, review_type: str = "all", limit: int = 50, offset: int = 0) -> list[dict]:
+    return await asyncio.to_thread(_get_review_queue, db_path, review_type, limit, offset)
+
+
+def _submit_transcription_correction(db_path: str, transcription_id: int, corrected_text: str) -> dict | None:
+    conn = _get_conn(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE transcriptions SET corrected_text = ?, review_status = 'corrected', reviewed_at = ?, needs_review = 0 WHERE id = ?",
+        (corrected_text, now, transcription_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+async def submit_transcription_correction(db_path: str, transcription_id: int, corrected_text: str) -> dict | None:
+    return await asyncio.to_thread(_submit_transcription_correction, db_path, transcription_id, corrected_text)
+
+
+def _confirm_transcription(db_path: str, transcription_id: int) -> dict | None:
+    conn = _get_conn(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE transcriptions SET review_status = 'confirmed', reviewed_at = ?, needs_review = 0 WHERE id = ?",
+        (now, transcription_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+async def confirm_transcription(db_path: str, transcription_id: int) -> dict | None:
+    return await asyncio.to_thread(_confirm_transcription, db_path, transcription_id)
+
+
+def _insert_alert_feedback(
+    db_path: str, alert_id: int, feedback_type: str,
+    corrected_summary: str | None = None, corrected_severity: str | None = None,
+    corrected_category: str | None = None, notes: str | None = None,
+) -> dict:
+    conn = _get_conn(db_path)
+    ts = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        "INSERT INTO alert_feedback (alert_id, feedback_type, corrected_summary, corrected_severity, corrected_category, notes, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (alert_id, feedback_type, corrected_summary, corrected_severity, corrected_category, notes, ts),
+    )
+    row_id = cur.lastrowid
+    conn.commit()
+    # Update daily stats
+    date_str = ts[:10]
+    _increment_feedback_stat(conn, date_str, feedback_type)
+    conn.close()
+    return {
+        "id": row_id, "alert_id": alert_id, "feedback_type": feedback_type,
+        "corrected_summary": corrected_summary, "corrected_severity": corrected_severity,
+        "corrected_category": corrected_category, "notes": notes, "created_at": ts,
+    }
+
+
+def _increment_feedback_stat(conn: sqlite3.Connection, date_str: str, feedback_type: str) -> None:
+    """Increment daily feedback stats."""
+    conn.execute(
+        "INSERT INTO feedback_stats (period_date, total_alerts) VALUES (?, 0) "
+        "ON CONFLICT(period_date) DO NOTHING",
+        (date_str,),
+    )
+    if feedback_type == "correct":
+        conn.execute(
+            "UPDATE feedback_stats SET true_positives = true_positives + 1 WHERE period_date = ?",
+            (date_str,),
+        )
+    elif feedback_type == "false_positive":
+        conn.execute(
+            "UPDATE feedback_stats SET false_positives = false_positives + 1 WHERE period_date = ?",
+            (date_str,),
+        )
+    elif feedback_type == "correction":
+        conn.execute(
+            "UPDATE feedback_stats SET corrections = corrections + 1 WHERE period_date = ?",
+            (date_str,),
+        )
+    conn.commit()
+
+
+async def insert_alert_feedback(
+    db_path: str, alert_id: int, feedback_type: str,
+    corrected_summary: str | None = None, corrected_severity: str | None = None,
+    corrected_category: str | None = None, notes: str | None = None,
+) -> dict:
+    return await asyncio.to_thread(
+        _insert_alert_feedback, db_path, alert_id, feedback_type,
+        corrected_summary, corrected_severity, corrected_category, notes,
+    )
+
+
+def _get_recent_false_positives(db_path: str, limit: int = 5) -> list[dict]:
+    conn = _get_conn(db_path)
+    rows = conn.execute(
+        "SELECT f.*, a.summary, a.category, a.severity FROM alert_feedback f "
+        "JOIN alerts a ON a.id = f.alert_id "
+        "WHERE f.feedback_type = 'false_positive' "
+        "ORDER BY f.created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+async def get_recent_false_positives(db_path: str, limit: int = 5) -> list[dict]:
+    return await asyncio.to_thread(_get_recent_false_positives, db_path, limit)
+
+
+def _get_correction_patterns(db_path: str, limit: int = 10) -> list[dict]:
+    """Get frequently corrected category patterns."""
+    conn = _get_conn(db_path)
+    rows = conn.execute(
+        "SELECT a.category as original_category, f.corrected_category, COUNT(*) as count "
+        "FROM alert_feedback f JOIN alerts a ON a.id = f.alert_id "
+        "WHERE f.feedback_type = 'correction' AND f.corrected_category IS NOT NULL "
+        "AND f.corrected_category != a.category "
+        "GROUP BY a.category, f.corrected_category ORDER BY count DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+async def get_correction_patterns(db_path: str, limit: int = 10) -> list[dict]:
+    return await asyncio.to_thread(_get_correction_patterns, db_path, limit)
+
+
+# --- Regional Dictionary ---
+
+
+def _get_dictionary_entries(db_path: str, category: str | None = None, active_only: bool = True) -> list[dict]:
+    conn = _get_conn(db_path)
+    conditions = []
+    params: list = []
+    if active_only:
+        conditions.append("active = 1")
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+    rows = conn.execute(
+        f"SELECT * FROM regional_dictionary{where} ORDER BY term ASC",
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+async def get_dictionary_entries(db_path: str, category: str | None = None, active_only: bool = True) -> list[dict]:
+    return await asyncio.to_thread(_get_dictionary_entries, db_path, category, active_only)
+
+
+def _upsert_dictionary_entry(db_path: str, term: str, replacement: str, category: str = "general") -> dict:
+    conn = _get_conn(db_path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO regional_dictionary (term, replacement, category, frequency, active, created_at, updated_at) "
+        "VALUES (?, ?, ?, 0, 1, ?, ?) "
+        "ON CONFLICT(term) DO UPDATE SET replacement = excluded.replacement, category = excluded.category, "
+        "updated_at = excluded.updated_at",
+        (term.lower(), replacement, category, now, now),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM regional_dictionary WHERE term = ?", (term.lower(),)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+async def upsert_dictionary_entry(db_path: str, term: str, replacement: str, category: str = "general") -> dict:
+    return await asyncio.to_thread(_upsert_dictionary_entry, db_path, term, replacement, category)
+
+
+def _delete_dictionary_entry(db_path: str, entry_id: int) -> bool:
+    conn = _get_conn(db_path)
+    cur = conn.execute("DELETE FROM regional_dictionary WHERE id = ?", (entry_id,))
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+async def delete_dictionary_entry(db_path: str, entry_id: int) -> bool:
+    return await asyncio.to_thread(_delete_dictionary_entry, db_path, entry_id)
+
+
+# --- Feedback Stats ---
+
+
+def _get_feedback_stats(db_path: str) -> dict:
+    conn = _get_conn(db_path)
+    # Recent stats (last 7 days)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    rows = conn.execute(
+        "SELECT * FROM feedback_stats WHERE period_date >= ? ORDER BY period_date DESC",
+        (cutoff,),
+    ).fetchall()
+    total_tp = sum(r["true_positives"] for r in rows)
+    total_fp = sum(r["false_positives"] for r in rows)
+    total_corrections = sum(r["corrections"] for r in rows)
+    total_feedback = total_tp + total_fp + total_corrections
+    fp_rate = (total_fp / total_feedback * 100) if total_feedback > 0 else 0.0
+
+    # Pending review count
+    pending_transcriptions = conn.execute(
+        "SELECT COUNT(*) FROM transcriptions WHERE needs_review = 1"
+    ).fetchone()[0]
+    pending_alerts = conn.execute(
+        "SELECT COUNT(*) FROM alerts a LEFT JOIN alert_feedback f ON f.alert_id = a.id WHERE f.id IS NULL"
+    ).fetchone()[0]
+
+    # Dictionary entry count
+    dict_count = conn.execute("SELECT COUNT(*) FROM regional_dictionary WHERE active = 1").fetchone()[0]
+
+    conn.close()
+    return {
+        "false_positive_rate": round(fp_rate, 1),
+        "true_positives": total_tp,
+        "false_positives": total_fp,
+        "corrections": total_corrections,
+        "total_feedback": total_feedback,
+        "pending_transcriptions": pending_transcriptions,
+        "pending_alerts": pending_alerts,
+        "pending_total": pending_transcriptions + pending_alerts,
+        "dictionary_entries": dict_count,
+    }
+
+
+async def get_feedback_stats(db_path: str) -> dict:
+    return await asyncio.to_thread(_get_feedback_stats, db_path)
+
+
+# --- Training Data Export ---
+
+
+def _get_training_data(db_path: str) -> list[dict]:
+    """Get corrected transcription pairs for training data export."""
+    conn = _get_conn(db_path)
+    rows = conn.execute(
+        "SELECT id, text, corrected_text, audio_file, confidence, flags "
+        "FROM transcriptions WHERE corrected_text IS NOT NULL "
+        "ORDER BY reviewed_at DESC"
+    ).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["flags"] = json.loads(d["flags"]) if d.get("flags") else []
+        except (json.JSONDecodeError, TypeError):
+            d["flags"] = []
+        results.append(d)
+    return results
+
+
+async def get_training_data(db_path: str) -> list[dict]:
+    return await asyncio.to_thread(_get_training_data, db_path)
+
+
+def _get_alert_training_data(db_path: str) -> list[dict]:
+    """Get alert feedback pairs for training data export."""
+    conn = _get_conn(db_path)
+    rows = conn.execute(
+        "SELECT a.id as alert_id, a.summary, a.severity, a.category, a.raw_context, "
+        "f.feedback_type, f.corrected_summary, f.corrected_severity, f.corrected_category "
+        "FROM alert_feedback f JOIN alerts a ON a.id = f.alert_id "
+        "ORDER BY f.created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+async def get_alert_training_data(db_path: str) -> list[dict]:
+    return await asyncio.to_thread(_get_alert_training_data, db_path)

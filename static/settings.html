@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings — TXKtoday Scanner Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1><a href="/" class="settings-back-link">&larr; Back</a> <span class="brand-accent">TXK</span>today — Settings</h1>
+    </header>
+
+    <div class="main">
+        <div class="panel config-panel active" id="panel-config">
+            <h2>Settings</h2>
+            <h3>Streams</h3>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Manage scanner streams. Each stream runs its own independent processing pipeline.</p>
+            <div id="streams-list"></div>
+            <div class="stream-add-form" id="stream-add-form">
+                <input type="text" id="stream-add-id" placeholder="ID (e.g. fire-dept)" class="dict-input">
+                <input type="text" id="stream-add-name" placeholder="Display Name" class="dict-input">
+                <input type="url" id="stream-add-url" placeholder="Stream URL" class="dict-input" style="flex:2">
+                <input type="color" id="stream-add-color" value="#00e89d" class="stream-color-input">
+                <button class="btn btn-sm" onclick="addStream()">Add Stream</button>
+            </div>
+            <hr class="config-divider">
+            <div class="form-group">
+                <label>OpenRouter API Key</label>
+                <input type="password" id="cfg-api-key" placeholder="sk-or-v1-...">
+            </div>
+            <div class="form-group">
+                <label>Analysis Model</label>
+                <select id="cfg-model">
+                    <option value="">Loading models...</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Whisper Model</label>
+                <select id="cfg-whisper">
+                    <option value="tiny">tiny (fastest)</option>
+                    <option value="base" selected>base</option>
+                    <option value="small">small (better accuracy)</option>
+                    <option value="medium">medium (high accuracy)</option>
+                    <option value="large-v3">large-v3 (best accuracy)</option>
+                    <option value="turbo">turbo (fast + accurate)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Alert Sensitivity</label>
+                <select id="cfg-sensitivity">
+                    <option value="low">Low - Critical events only</option>
+                    <option value="medium" selected>Medium - Significant events</option>
+                    <option value="high">High - Most notable events</option>
+                </select>
+            </div>
+            <hr class="config-divider">
+            <h3>Audio Processing (VAD)</h3>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">Voice Activity Detection settings. The VAD detects speech in the audio stream and only processes actual radio transmissions, filtering out dead air.</p>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>VAD Threshold <span class="label-hint">(RMS energy, e.g. 0.01)</span></label>
+                    <input type="number" id="cfg-vad-threshold" step="0.005" min="0.001" max="0.1" placeholder="0.01">
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Grace Period <span class="label-hint">(seconds)</span></label>
+                    <input type="number" id="cfg-vad-grace" step="0.5" min="0.5" max="10" placeholder="1.5">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Pre-roll Buffer <span class="label-hint">(seconds)</span></label>
+                    <input type="number" id="cfg-vad-pre-roll" step="0.5" min="0" max="5" placeholder="1.0">
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Min Chunk Duration <span class="label-hint">(seconds)</span></label>
+                    <input type="number" id="cfg-vad-min-chunk" step="0.5" min="0.5" max="10" placeholder="1.5">
+                </div>
+            </div>
+            <div class="form-group" style="max-width:50%">
+                <label>Max Chunk Duration <span class="label-hint">(seconds)</span></label>
+                <input type="number" id="cfg-vad-max-chunk" step="5" min="10" max="300" placeholder="60">
+            </div>
+            <hr class="config-divider">
+            <h3>Notifications</h3>
+            <div class="form-group">
+                <label>Webhook URL <span class="label-hint">(n8n or other — fires on shooting alerts)</span></label>
+                <input type="url" id="cfg-webhook-url" placeholder="https://your-n8n-instance.com/webhook/...">
+            </div>
+            <hr class="config-divider">
+            <h3>AI Analysis Prompt</h3>
+            <div class="form-group">
+                <label>Base System Prompt <span class="label-hint">(read-only)</span></label>
+                <textarea id="cfg-system-prompt" readonly rows="10" style="resize:vertical;opacity:0.7;cursor:default"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Custom Instructions <span class="label-hint">(appended to prompt)</span></label>
+                <textarea id="cfg-custom-instructions" rows="5" style="resize:vertical" placeholder="e.g. This scanner monitors Springfield County PD. Alert on any mentions of Main Street or the downtown area. Ignore routine traffic stops on Highway 65."></textarea>
+            </div>
+            <hr class="config-divider">
+            <h3>Map Settings</h3>
+            <div class="form-group">
+                <label>Google Maps API Key</label>
+                <input type="password" id="cfg-maps-api-key" placeholder="AIza...">
+            </div>
+            <div class="form-row">
+                <div class="form-group" style="flex:1">
+                    <label>Default Map Center Latitude</label>
+                    <input type="number" id="cfg-map-lat" step="0.0001" placeholder="33.4418">
+                </div>
+                <div class="form-group" style="flex:1">
+                    <label>Default Map Center Longitude</label>
+                    <input type="number" id="cfg-map-lng" step="0.0001" placeholder="-94.0477">
+                </div>
+            </div>
+            <button class="btn" onclick="saveConfig()">Save Settings</button>
+            <span class="save-msg" id="save-msg">Settings saved!</span>
+            <hr class="config-divider">
+            <h3>Regional Dictionary</h3>
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">Words and phrases that are auto-corrected before LLM analysis. Useful for fixing common Whisper transcription errors on police radio jargon.</p>
+            <div class="dict-add-form">
+                <input type="text" id="dict-term" placeholder="Term (e.g. code for)" class="dict-input">
+                <input type="text" id="dict-replacement" placeholder="Replacement (e.g. code 4)" class="dict-input">
+                <select id="dict-category" class="dict-input dict-select">
+                    <option value="general">General</option>
+                    <option value="ten_code">10-Code</option>
+                    <option value="location">Location</option>
+                    <option value="unit">Unit</option>
+                    <option value="slang">Slang</option>
+                </select>
+                <button class="btn btn-sm" onclick="addDictionaryEntry()">Add</button>
+            </div>
+            <div id="dictionary-table-container">
+                <table class="dict-table" id="dictionary-table">
+                    <thead><tr><th>Term</th><th>Replacement</th><th>Category</th><th></th></tr></thead>
+                    <tbody id="dictionary-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="/settings.js"></script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Queue — TXKtoday Scanner Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1><a href="/" class="settings-back-link">&larr; Back</a> <span class="brand-accent">TXK</span>today — Review Queue</h1>
+    </header>
+
+    <div class="main">
+        <div class="panel review-panel active" id="panel-review">
+            <div class="review-toolbar">
+                <h2>Review Queue</h2>
+                <div class="review-stats" id="review-stats"></div>
+            </div>
+            <div class="review-filters">
+                <button class="review-filter-btn active" data-filter="all">All</button>
+                <button class="review-filter-btn" data-filter="transcriptions">Transcriptions</button>
+                <button class="review-filter-btn" data-filter="alerts">Alerts</button>
+            </div>
+            <div id="review-queue-list">
+                <div class="empty-state">Loading review queue...</div>
+            </div>
+        </div>
+    </div>
+
+    <audio id="shared-audio"></audio>
+
+    <script src="/review.js"></script>
+</body>
+</html>
