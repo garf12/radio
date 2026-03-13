@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 
 from websocket_manager import ws_manager
 
@@ -14,5 +14,7 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             # Keep connection alive; client may send pings
             await ws.receive_text()
-    except WebSocketDisconnect:
+    except Exception:
+        pass
+    finally:
         ws_manager.disconnect(ws)

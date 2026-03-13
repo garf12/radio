@@ -8,6 +8,19 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
+# Module-level cached clients keyed by api_key to reuse HTTP connection pools
+_openai_clients: dict[str, AsyncOpenAI] = {}
+
+
+def _get_openai_client(api_key: str) -> AsyncOpenAI:
+    """Return a cached AsyncOpenAI client for the given API key."""
+    if api_key not in _openai_clients:
+        _openai_clients[api_key] = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+        )
+    return _openai_clients[api_key]
+
 SENSITIVITY_THRESHOLDS = {
     "low": "Only alert on clearly critical events: active shootings, major explosions, officer down, mass casualty incidents.",
     "medium": "Alert on significant events: shootings, armed suspects, pursuits, structure fires, serious accidents, missing persons.",
@@ -143,10 +156,7 @@ async def analyze_transcript(
     if feedback_ctx:
         system_content += "\n\n" + feedback_ctx
 
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+    client = _get_openai_client(api_key)
 
     try:
         response = await client.chat.completions.create(
@@ -257,10 +267,7 @@ async def generate_summary(
         transcript_lines.append(f"[{ts}] {text}")
     combined = "\n".join(transcript_lines)
 
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+    client = _get_openai_client(api_key)
 
     try:
         response = await client.chat.completions.create(

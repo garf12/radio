@@ -26,7 +26,7 @@ class WebSocketManager:
     async def broadcast(self, message: dict) -> None:
         data = json.dumps(message)
         dead: list[WebSocket] = []
-        for ws in self._connections:
+        for ws in list(self._connections):
             try:
                 await ws.send_text(data)
             except Exception:

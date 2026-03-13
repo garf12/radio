@@ -58,7 +58,7 @@ def _start_ffmpeg(stream_url: str) -> subprocess.Popen:
         "-loglevel", "error",
         "pipe:1",
     ]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
 
 def audio_to_wav_bytes(raw_pcm: bytes) -> bytes:

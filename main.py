@@ -17,6 +17,7 @@ from database import (
     get_active_events, insert_event, update_event, link_alert_to_event, get_event_with_alerts,
     auto_resolve_stale_events, find_matching_event,
     get_recent_transcriptions, insert_summary,
+    cleanup_old_data,
 )
 from stream_capture import read_chunks, audio_to_wav_bytes
 from transcriber import transcribe_chunk
@@ -29,7 +30,7 @@ from routes.ws import router as ws_router
 import pipeline_state
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -38,6 +39,21 @@ logger = logging.getLogger(__name__)
 def _write_file(path: str, data: bytes) -> None:
     with open(path, "wb") as f:
         f.write(data)
+
+
+def _cleanup_old_audio(audio_dir: str, max_age_days: int = 7) -> int:
+    """Delete WAV files older than max_age_days. Returns count of deleted files."""
+    import glob
+    deleted = 0
+    cutoff = _time.time() - (max_age_days * 86400)
+    for filepath in glob.glob(os.path.join(audio_dir, "*.wav")):
+        try:
+            if os.path.getmtime(filepath) < cutoff:
+                os.remove(filepath)
+                deleted += 1
+        except OSError:
+            pass
+    return deleted
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +400,8 @@ class StreamManager:
         last_stale_check: datetime | None = None
         last_summary_times: dict[str, datetime] = {}    # stream_id -> last 10min summary
         last_hourly_times: dict[str, datetime] = {}     # stream_id -> last hourly summary
+        last_audio_cleanup: datetime | None = None
+        last_db_cleanup: datetime | None = None
 
         try:
             while True:
@@ -417,6 +435,29 @@ class StreamManager:
                                 logger.info("Auto-resolved stale event %d: %s", ev["id"], ev.get("title", ""))
                 except Exception:
                     logger.exception("Error in stale event check")
+
+                # Audio file cleanup (hourly, delete WAVs older than 7 days)
+                try:
+                    now = datetime.now(timezone.utc)
+                    if not last_audio_cleanup or (now - last_audio_cleanup).total_seconds() >= 3600:
+                        last_audio_cleanup = now
+                        deleted = await asyncio.to_thread(_cleanup_old_audio, config.audio_dir)
+                        if deleted:
+                            logger.info("Audio cleanup: deleted %d old WAV files", deleted)
+                except Exception:
+                    logger.exception("Error in audio cleanup")
+
+                # DB data retention cleanup (daily, delete data older than 30 days)
+                try:
+                    now = datetime.now(timezone.utc)
+                    if not last_db_cleanup or (now - last_db_cleanup).total_seconds() >= 86400:
+                        last_db_cleanup = now
+                        counts = await cleanup_old_data(config.db_path, retention_days=30)
+                        total = sum(counts.values())
+                        if total:
+                            logger.info("DB cleanup: deleted %s", counts)
+                except Exception:
+                    logger.exception("Error in DB cleanup")
 
                 # Per-stream summaries
                 if not config.openrouter_api_key:
